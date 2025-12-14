@@ -25,31 +25,61 @@ def is_main_process():
     )
 
 # This function creates a plot that we will send to WandB
-
 def plot_slices_combined(combined, gt, pred, debug=False):
     """
-    Plot the image, ground truth and prediction of the mid-sagittal axial slice
-    The orientaion is assumed to RPI
+    Plot image, ground truth, and prediction.
+    Works for both 2D and 3D nnUNet data.
+    Orientation is assumed to be RPI.
     """
 
-    mid_sagittal = combined.shape[2] // 2
+    if combined.ndim == 2:
+        # ---------- 2D ----------
+        fig, axs = plt.subplots(3, 1, figsize=(6, 12))
+        fig.suptitle('Image --> Ground Truth --> Prediction')
 
-    # plot X slices before and after the mid-sagittal slice in a grid
-    fig, axs = plt.subplots(3, 6, figsize=(10, 6))
-    fig.suptitle('T2 Image --> Other contrast --> Ground Truth --> Prediction')
-    if np.all(combined == 0):
-        print("Array contains only zeros")
-    for i in range(6):
-        axs[0, i].imshow(combined[:, :, mid_sagittal - 3 + i].T, cmap='gray')
-        axs[0, i].axis('off')
-        axs[1, i].imshow(gt[:, :, mid_sagittal - 3 + i].T)
-        axs[1, i].axis('off')
-        axs[2, i].imshow(pred[:, :, mid_sagittal - 3 + i].T)
-        axs[2, i].axis('off')
+        axs[0].imshow(combined.T, cmap='gray')
+        axs[0].axis('off')
 
-    plt.tight_layout()
-    fig.show()
-    return fig
+        axs[1].imshow(gt.T)
+        axs[1].axis('off')
+
+        axs[2].imshow(pred.T)
+        axs[2].axis('off')
+
+        plt.tight_layout()
+        if debug:
+            print("2D image shape:", combined.shape)
+        return fig
+
+    elif combined.ndim == 3:
+        # ---------- 3D ----------
+        mid_sagittal = combined.shape[2] // 2
+        fig, axs = plt.subplots(3, 6, figsize=(10, 6))
+        fig.suptitle('T2 Image --> Other contrast --> Ground Truth --> Prediction')
+
+        if np.all(combined == 0):
+            print("Array contains only zeros")
+
+        for i in range(6):
+            z = np.clip(mid_sagittal - 3 + i, 0, combined.shape[2]-1)  # prevent out-of-bounds
+
+            axs[0, i].imshow(combined[:, :, z].T, cmap='gray')
+            axs[0, i].axis('off')
+
+            axs[1, i].imshow(gt[:, :, z].T)
+            axs[1, i].axis('off')
+
+            axs[2, i].imshow(pred[:, :, z].T)
+            axs[2, i].axis('off')
+
+        plt.tight_layout()
+        if debug:
+            print("3D image shape:", combined.shape)
+        return fig
+
+    else:
+        raise ValueError(f"Unsupported image shape: {combined.shape}")
+
 
 
 class nnUNetTrainerCustom(nnUNetTrainer):
@@ -119,15 +149,21 @@ class nnUNetTrainerCustom(nnUNetTrainer):
 
             # only modification to train_stp to plot middle slices and save to wandb only for the first batch_id
             if is_main_process() and batch_id == 0:
-                train_image = data[0].detach().cpu().squeeze().float().numpy()
-                train_gt = target[0].detach().cpu().squeeze().float().numpy()[0]
-                train_pred = np.argmax(output[0].detach().cpu().squeeze().numpy(), axis=1)[0]
+                # -------- safe extraction --------
+                # data: (B, C, H, W) for 2D or (B, C, H, W, D) for 3D
+                # target: (B, 1, H, W) for 2D or (B, 1, H, W, D) for 3D
+                # output: (B, num_classes, H, W) for 2D or (B, num_classes, H, W, D) for 3D
 
-                fig = plot_slices_combined(combined=train_image,
-                                           gt=train_gt,
-                                           pred=train_pred,
-                                           )
+                train_image = data[0, 0].detach().cpu().float().numpy()  # first channel
+                if isinstance(target, list):
+                    train_gt = target[0][0].detach().cpu().numpy()  # first target, first channel
+                else:
+                    train_gt = target[0, 0].detach().cpu().numpy()  # first target, first channel
 
+                train_pred = output[0].argmax(0).detach().cpu().numpy()  # argmax over classes
+
+                # Plot
+                fig = plot_slices_combined(train_image, train_gt, train_pred)
                 self.wandb.log({"training images": self.wandb.Image(fig)})
                 plt.close(fig)
 
