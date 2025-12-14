@@ -166,6 +166,7 @@ class nnUNetTrainerCustom(nnUNetTrainer):
         logger_dict['val_loss'] = validation_loss
 
         self.wandb.log(logger_dict)
+        return logger_dict
 
     def run_training(self):
         # only modification: self.train_step from Subclass now requires batch_id to plot slices to wandb
