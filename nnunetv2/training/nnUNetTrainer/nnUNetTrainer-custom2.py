@@ -11,6 +11,7 @@ from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 
 from nnunetv2.utilities.helpers import dummy_context
 from nnunetv2.training.nnUNetTrainer.variants.WandbWrapper import WandbWrapper
+from importlib.resources import files
 
 
 # This function creates a plot that we will send to WandB
@@ -50,7 +51,8 @@ class nnUNetTrainerCustom(nnUNetTrainer):
         # wandb extension (overwrite parameters)
 
         # Hyperparameters initialization
-        yaml_config = yaml.safe_load(open("nnunetv2/training/nnUNetTrainer/config.yaml"))
+        config_path = files("nnunetv2.training.nnUNetTrainer").joinpath("config.yaml")
+        yaml_config = yaml.safe_load(config_path)
         yaml_config['architecture'] = configuration
         yaml_config['fold'] = fold
         self.num_epochs = yaml_config['num_epochs']
