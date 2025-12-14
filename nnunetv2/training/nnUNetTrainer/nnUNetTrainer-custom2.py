@@ -52,7 +52,9 @@ class nnUNetTrainerCustom(nnUNetTrainer):
 
         # Hyperparameters initialization
         config_path = files("nnunetv2.training.nnUNetTrainer").joinpath("config.yaml")
-        yaml_config = yaml.safe_load(config_path)
+        with open(config_path) as f:
+            yaml_config = yaml.safe_load(f)
+
         yaml_config['architecture'] = configuration
         yaml_config['fold'] = fold
         self.num_epochs = yaml_config['num_epochs']
