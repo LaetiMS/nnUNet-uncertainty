@@ -14,6 +14,16 @@ from nnunetv2.training.nnUNetTrainer.variants.WandbWrapper import WandbWrapper
 from importlib.resources import files
 
 
+import torch.distributed as dist
+
+# to check if main process is running -> for wandb logging
+def is_main_process():
+    return (
+        not dist.is_available()
+        or not dist.is_initialized()
+        or dist.get_rank() == 0
+    )
+
 # This function creates a plot that we will send to WandB
 
 def plot_slices_combined(combined, gt, pred, debug=False):
@@ -69,11 +79,17 @@ class nnUNetTrainerCustom(nnUNetTrainer):
 
         # WandbWrapper initialization
         self.wandb = WandbWrapper(use_wandb=yaml_config['wandb_enabled'], config=yaml_config)
+        # self.wandb.init()
+
+    def on_train_start(self):
+        super().on_train_start()
         self.wandb.init()
+
 
     def on_train_end(self):
         super().on_train_end()
-        self.wandb.finish()
+        if is_main_process():
+            self.wandb.finish()
 
     # train_step -> batch_id was added as  modified
     def train_step(self, batch: dict, batch_id: int) -> dict:
@@ -102,7 +118,7 @@ class nnUNetTrainerCustom(nnUNetTrainer):
             l = self.loss(output, target)
 
             # only modification to train_stp to plot middle slices and save to wandb only for the first batch_id
-            if batch_id == 0:
+            if is_main_process() and batch_id == 0:
                 train_image = data[0].detach().cpu().squeeze().float().numpy()
                 train_gt = target[0].detach().cpu().squeeze().float().numpy()[0]
                 train_pred = np.argmax(output[0].detach().cpu().squeeze().numpy(), axis=1)[0]
@@ -131,41 +147,43 @@ class nnUNetTrainerCustom(nnUNetTrainer):
 
 
     def on_epoch_end(self):
-        self.wandb.log({"epoch": self.current_epoch, "val_loss": self.logger.my_fantastic_logging['val_losses'][-1],
-                        "training_loss": self.logger.my_fantastic_logging['train_losses'][-1],
-                        "lr": self.optimizer.param_groups[0]['lr']})
+        if is_main_process():
+            self.wandb.log({"epoch": self.current_epoch, "val_loss": self.logger.my_fantastic_logging['val_losses'][-1],
+                            "training_loss": self.logger.my_fantastic_logging['train_losses'][-1],
+                            "lr": self.optimizer.param_groups[0]['lr']})
 
-        all_dice = [np.round(i, decimals=4) for i in self.logger.my_fantastic_logging['dice_per_class_or_region'][-1]]
-        dice_val = np.average(all_dice)  # exclude background in the average dice
-        self.wandb.log({"Average Dice": np.round(dice_val, decimals=4)})
+            all_dice = [np.round(i, decimals=4) for i in self.logger.my_fantastic_logging['dice_per_class_or_region'][-1]]
+            dice_val = np.average(all_dice)  # exclude background in the average dice
+            self.wandb.log({"Average Dice": np.round(dice_val, decimals=4)})
 
-        for label_name, label_idx in self.dataset_json['labels'].items():
-            # Skip the 'background' or any label with index 0
+            for label_name, label_idx in self.dataset_json['labels'].items():
+                # Skip the 'background' or any label with index 0
 
-            if label_idx == 0:
-                continue
+                if label_idx == 0:
+                    continue
 
-            all_dice_idx = label_idx - 1
+                all_dice_idx = label_idx - 1
 
-            if 0 <= all_dice_idx < len(all_dice):
-                dice_score = np.round(all_dice[all_dice_idx], decimals=4)
+                if 0 <= all_dice_idx < len(all_dice):
+                    dice_score = np.round(all_dice[all_dice_idx], decimals=4)
 
-                self.wandb.log({f"{label_name} Dice": dice_score})
-        # handle 'best' checkpointing. ema_fg_dice is computed by the logger and can be accessed like this
-        if self._best_ema is None or self.logger.my_fantastic_logging['ema_fg_dice'][-1] > self._best_ema:
-            self.wandb.log({"best EMA pseudo Dice": np.round(self._best_ema, decimals=4)})
+                    self.wandb.log({f"{label_name} Dice": dice_score})
+            # handle 'best' checkpointing. ema_fg_dice is computed by the logger and can be accessed like this
+            if self._best_ema is None or self.logger.my_fantastic_logging['ema_fg_dice'][-1] > self._best_ema:
+                self.wandb.log({"best EMA pseudo Dice": np.round(self._best_ema, decimals=4)})
 
         super().on_epoch_end() # added at the end, cause at end of on_epoch_end self.current_epoch += 1
 
     def validation_step(self, batch: dict) -> dict:
-        logger_dict = super().validation_step(batch).copy()
+        logger_dict = super().validation_step(batch)
+        if is_main_process():
+            logger_dict_main = logger_dict.copy()
+            #rename loss to validation loss, to avoid confusion with loss from training
+            validation_loss = logger_dict_main['loss']
+            logger_dict_main.pop('loss')
+            logger_dict_main['val_loss'] = validation_loss
 
-        #rename loss to validation loss, to avoid confusion with loss from training
-        validation_loss = logger_dict['loss']
-        logger_dict.pop('loss')
-        logger_dict['val_loss'] = validation_loss
-
-        self.wandb.log(logger_dict)
+            self.wandb.log(logger_dict_main)
         return logger_dict
 
     def run_training(self):
