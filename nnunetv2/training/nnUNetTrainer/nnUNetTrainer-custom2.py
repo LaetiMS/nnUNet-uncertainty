@@ -170,7 +170,7 @@ class nnUNetTrainerCustom(nnUNetTrainer):
                     self.wandb.log({f"{label_name} Dice": dice_score})
             # handle 'best' checkpointing. ema_fg_dice is computed by the logger and can be accessed like this
             if self._best_ema is None or self.logger.my_fantastic_logging['ema_fg_dice'][-1] > self._best_ema:
-                self.wandb.log({"best EMA pseudo Dice": np.round(self._best_ema, decimals=4)})
+                self.wandb.log({"best EMA pseudo Dice": self._best_ema})
 
         super().on_epoch_end() # added at the end, cause at end of on_epoch_end self.current_epoch += 1
 
