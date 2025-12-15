@@ -24,6 +24,10 @@ class WandbWrapper():
         if self.use_wandb:
             return wandb.log(*args, **kwargs)
 
+    def Image(self, *args, **kwargs):
+        if self.use_wandb:
+            return wandb.Image(*args, **kwargs)
+
     def finish(self):
         if self.use_wandb:
             return wandb.finish()
