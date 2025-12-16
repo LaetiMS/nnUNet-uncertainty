@@ -51,7 +51,9 @@ dependencies = [
     "yacs",
     "batchgeneratorsv2>=0.3.0",
     "einops",
-    "blosc2>=3.0.0b1"
+    "blosc2>=3.0.0b1",
+    "wandb"
+    "medpy"
 ]
 
 [project.urls]

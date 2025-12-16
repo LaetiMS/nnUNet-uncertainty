@@ -15,6 +15,11 @@ from nnunetv2.imageio.simpleitk_reader_writer import SimpleITKIO
 from nnunetv2.utilities.json_export import recursive_fix_for_json_export
 from nnunetv2.utilities.plans_handling.plans_handler import PlansManager
 
+import warnings
+from medpy.metric.binary import hd, hd95
+import numpy as np
+
+
 
 def label_or_region_to_key(label_or_region: Union[int, Tuple[int]]):
     return str(label_or_region)
@@ -88,11 +93,26 @@ def compute_tp_fp_fn_tn(mask_ref: np.ndarray, mask_pred: np.ndarray, ignore_mask
 def compute_metrics(reference_file: str, prediction_file: str, image_reader_writer: BaseReaderWriter,
                     labels_or_regions: Union[List[int], List[Union[int, Tuple[int, ...]]]],
                     ignore_label: int = None) -> dict:
+    """
+    Compute a variety of metrics for binary or multi-label segmentation:
+    - Dice, IoU
+    - Precision, Sensitivity (Recall), Specificity, Balanced Accuracy
+    - Lesion-wise Precision and Recall (case-level detection)
+    - Hausdorff Distance (HD) and HD95 (with optional physical spacing)
+    """
+
+
     # load images
     seg_ref, seg_ref_dict = image_reader_writer.read_seg(reference_file)
     seg_pred, seg_pred_dict = image_reader_writer.read_seg(prediction_file)
 
     ignore_mask = seg_ref == ignore_label if ignore_label is not None else None
+    spacing = seg_ref_dict.get("spacing", None)  # physical spacing (mm)
+    if spacing is None:
+        warnings.warn(
+            f"No spacing found for {reference_file}. "
+            "HD/HD95 will be computed in voxel units."
+        )
 
     results = {}
     results['reference_file'] = reference_file
@@ -109,12 +129,49 @@ def compute_metrics(reference_file: str, prediction_file: str, image_reader_writ
         else:
             results['metrics'][r]['Dice'] = 2 * tp / (2 * tp + fp + fn)
             results['metrics'][r]['IoU'] = tp / (tp + fp + fn)
+
+        # Store confusion counts
         results['metrics'][r]['FP'] = fp
         results['metrics'][r]['TP'] = tp
         results['metrics'][r]['FN'] = fn
         results['metrics'][r]['TN'] = tn
         results['metrics'][r]['n_pred'] = fp + tp
         results['metrics'][r]['n_ref'] = fn + tp
+
+        # Voxel-wise metrics
+        results['metrics'][r]['Precision'] = tp / (tp + fp) if (tp + fp) > 0 else np.nan
+        results['metrics'][r]['Sensitivity'] = tp / (tp + fn) if (tp + fn) > 0 else np.nan #recall
+        results['metrics'][r]['Specificity'] = tn / (tn + fp) if (tn + fp) > 0 else np.nan
+        results['metrics'][r]['BalancedAccuracy'] = (
+            0.5 * ((tp / (tp + fn) if (tp + fn) > 0 else 0) +
+                   (tn / (tn + fp) if (tn + fp) > 0 else 0))
+        )
+
+        # Case-level / lesion-wise metrics
+        has_gt = mask_ref.any()
+        has_pred = mask_pred.any()
+        has_overlap = np.logical_and(mask_ref, mask_pred).any()  # True if there’s any overlapping voxel
+
+        # Lesion-wise Recall (Detection of GT tumor)
+        results['metrics'][r]['LesionRecall'] = 1.0 if has_gt and has_overlap else (0.0 if has_gt else np.nan)
+
+        # Lesion-wise Precision (accuracy of predicted tumor)
+        results['metrics'][r]['LesionPrecision'] = 1.0 if has_pred and has_overlap else (0.0 if has_pred else np.nan)
+
+        # Hausdorff metrics (medpy)
+        # HD is undefined if either GT or prediction is empty
+        if has_gt and has_pred:
+            try:
+                results['metrics'][r]['HD'] = hd(mask_pred, mask_ref, voxelspacing=spacing)
+                results['metrics'][r]['HD95'] = hd95(mask_pred, mask_ref, voxelspacing=spacing)
+            except Exception:
+                results['metrics'][r]['HD'] = np.nan
+                results['metrics'][r]['HD95'] = np.nan
+        else:
+            results['metrics'][r]['HD'] = np.nan
+            results['metrics'][r]['HD95'] = np.nan
+
+
     return results
 
 
