@@ -89,6 +89,20 @@ def compute_tp_fp_fn_tn(mask_ref: np.ndarray, mask_pred: np.ndarray, ignore_mask
     tn = np.sum(((~mask_ref) & (~mask_pred)) & use_mask)
     return tp, fp, fn, tn
 
+def adapt_spacing(spacing, ndim):
+    """
+    Make voxel spacing compatible with mask dimensionality.
+    """
+    if spacing is None:
+        return None
+    spacing = tuple(spacing)
+    if len(spacing) == ndim:
+        return spacing
+    if len(spacing) > ndim:
+        return spacing[-ndim:]
+    # spacing shorter than ndim is invalid
+    return None
+
 
 def compute_metrics(reference_file: str, prediction_file: str, image_reader_writer: BaseReaderWriter,
                     labels_or_regions: Union[List[int], List[Union[int, Tuple[int, ...]]]],
@@ -162,15 +176,22 @@ def compute_metrics(reference_file: str, prediction_file: str, image_reader_writ
         # HD is undefined if either GT or prediction is empty
         if has_gt and has_pred:
             try:
-                results['metrics'][r]['HD'] = hd(mask_pred, mask_ref, voxelspacing=spacing)
-                results['metrics'][r]['HD95'] = hd95(mask_pred, mask_ref, voxelspacing=spacing)
-            except Exception:
+                # Remove singleton dimensions (important!)
+                mask_ref_hd = np.squeeze(mask_ref).astype(bool)
+                mask_pred_hd = np.squeeze(mask_pred).astype(bool)
+
+                ndim = mask_ref_hd.ndim
+                spacing_hd = adapt_spacing(spacing, ndim)
+
+                results['metrics'][r]['HD'] = hd(
+                    mask_pred_hd, mask_ref_hd, voxelspacing=spacing_hd
+                )
+                results['metrics'][r]['HD95'] = hd95(
+                    mask_pred_hd, mask_ref_hd, voxelspacing=spacing_hd
+                )
+            except Exception as e:
                 results['metrics'][r]['HD'] = np.nan
                 results['metrics'][r]['HD95'] = np.nan
-        else:
-            results['metrics'][r]['HD'] = np.nan
-            results['metrics'][r]['HD95'] = np.nan
-
 
     return results
 
