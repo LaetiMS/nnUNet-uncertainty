@@ -26,7 +26,7 @@ def is_main_process():
 
 # This function creates a plot that we will send to WandB
 
-def plot_slices_combined(combined, gt, pred, debug=False):
+def plot_slices_combined(combined, gt, pred, current_epoch, debug=False):
     """
     Plot the image, ground truth and prediction of the mid-sagittal axial slice
     The orientaion is assumed to RPI
@@ -36,7 +36,7 @@ def plot_slices_combined(combined, gt, pred, debug=False):
 
     # plot X slices before and after the mid-sagittal slice in a grid
     fig, axs = plt.subplots(3, 6, figsize=(10, 6))
-    fig.suptitle('T2 Image --> Other contrast --> Ground Truth --> Prediction')
+    fig.suptitle(f'Epoch: {current_epoch}: T2 Image --> Other contrast --> Ground Truth --> Prediction')
     if np.all(combined == 0):
         print("Array contains only zeros")
     for i in range(6):
@@ -126,7 +126,7 @@ class nnUNetTrainerCustom(nnUNetTrainer):
                 fig = plot_slices_combined(combined=train_image,
                                            gt=train_gt,
                                            pred=train_pred,
-                                           )
+                                           current_epoch = self.current_epoch)
 
                 self.wandb.log({"training images": self.wandb.Image(fig)})
                 plt.close(fig)
