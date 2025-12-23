@@ -1013,8 +1013,8 @@ def predict_entry_point():
     #                           num_processes_segmentation_export=args.nps,
     #                           folder_with_segs_from_prev_stage=args.prev_stage_predictions,
     #                           num_parts=args.num_parts,
-    #                           part_id=args.part_id,
     #                           device=device)
+    #                           part_id=args.part_id,
 
 
 if __name__ == '__main__':
@@ -1031,8 +1031,13 @@ if __name__ == '__main__':
         verbose_preprocessing=False,
         allow_tqdm=True
     )
+    # predictor.initialize_from_trained_model_folder(
+    #     join(nnUNet_results, 'Dataset004_Hippocampus/nnUNetTrainer_5epochs__nnUNetPlans__3d_fullres'),
+    #     use_folds=(0,),
+    #     checkpoint_name='checkpoint_final.pth',
+    # )
     predictor.initialize_from_trained_model_folder(
-        join(nnUNet_results, 'Dataset004_Hippocampus/nnUNetTrainer_5epochs__nnUNetPlans__3d_fullres'),
+        join(nnUNet_results, r'Dataset001_unilateral_axial_only\nnUNetTrainer__nnUNetPlans__3d_fullres'),
         use_folds=(0,),
         checkpoint_name='checkpoint_final.pth',
     )
@@ -1051,9 +1056,13 @@ if __name__ == '__main__':
     # iterator = predictor.get_data_iterator_from_raw_npy_data([img], None, [props], None, 1)
     # ret = predictor.predict_from_data_iterator(iterator, False, 1)
 
+    # ret = predictor.predict_from_files_sequential(
+    #     [['/media/isensee/raw_data/nnUNet_raw/Dataset004_Hippocampus/imagesTs/hippocampus_002_0000.nii.gz'], ['/media/isensee/raw_data/nnUNet_raw/Dataset004_Hippocampus/imagesTs/hippocampus_005_0000.nii.gz']],
+    #     '/home/isensee/temp/tmp', False, True, None
+    # )
     ret = predictor.predict_from_files_sequential(
-        [['/media/isensee/raw_data/nnUNet_raw/Dataset004_Hippocampus/imagesTs/hippocampus_002_0000.nii.gz'], ['/media/isensee/raw_data/nnUNet_raw/Dataset004_Hippocampus/imagesTs/hippocampus_005_0000.nii.gz']],
-        '/home/isensee/temp/tmp', False, True, None
+        [[r'C:\Users\Laetitia\Documents\Programming\PdMLaetitia\data_nnUnet_compatible\raw\Dataset001_unilateral_axial_only\imagesTs\DUKE_005_A_0000.nii.gz'], [r'C:\Users\Laetitia\Documents\Programming\PdMLaetitia\data_nnUnet_compatible\raw\Dataset001_unilateral_axial_only\imagesTs\DUKE_021_B_0000.nii.gz']],
+        r'C:\Users\Laetitia\Documents\Programming\PdMLaetitia\data_nnUnet_compatible\nnUNet_uncertainty\Dataset001_unilateral_axial_only', False, True, None
     )
 
 
