@@ -895,6 +895,8 @@ class nnUNetTrainer(object):
         if not self.was_initialized:
             self.initialize()
 
+        # self.save_checkpoint("random_weights_custom.pth")
+
         # dataloaders must be instantiated here (instead of __init__) because they need access to the training data
         # which may not be present  when doing inference
         self.dataloader_train, self.dataloader_val = self.get_dataloaders()
