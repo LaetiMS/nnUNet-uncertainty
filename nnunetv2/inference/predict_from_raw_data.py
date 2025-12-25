@@ -1017,52 +1017,62 @@ def predict_entry_point():
     #                           part_id=args.part_id,
 
 
-if __name__ == '__main__':
-    ########################## predict a bunch of files
-    from nnunetv2.paths import nnUNet_results, nnUNet_raw
-
-    predictor = nnUNetPredictor(
-        tile_step_size=0.5,
-        use_gaussian=True,
-        use_mirroring=True,
-        perform_everything_on_device=True,
-        device=torch.device('cuda', 0),
-        verbose=False,
-        verbose_preprocessing=False,
-        allow_tqdm=True
-    )
+# if __name__ == '__main__':
+    # ########################## predict a bunch of files
+    # from nnunetv2.paths import nnUNet_results, nnUNet_raw
+    #
+    # predictor = nnUNetPredictor(
+    #     tile_step_size=0.5,
+    #     use_gaussian=True,
+    #     use_mirroring=True,
+    #     perform_everything_on_device=True,
+    #     #device=torch.device('cuda', 0),
+    #     device=torch.device("cpu"),
+    #     verbose=False,
+    #     verbose_preprocessing=False,
+    #     allow_tqdm=True
+    # )
+    # # predictor.initialize_from_trained_model_folder(
+    # #     join(nnUNet_results, 'Dataset004_Hippocampus/nnUNetTrainer_5epochs__nnUNetPlans__3d_fullres'),
+    # #     use_folds=(0,),
+    # #     checkpoint_name='checkpoint_final.pth',
+    # # )
     # predictor.initialize_from_trained_model_folder(
-    #     join(nnUNet_results, 'Dataset004_Hippocampus/nnUNetTrainer_5epochs__nnUNetPlans__3d_fullres'),
+    #     join(nnUNet_results, r'C:\Users\Laetitia\Documents\Programming\PdMLaetitia\data_nnUnet_compatible\nnUNet_results\Dataset100_unilateral_axial_only\nnUNetTrainer_SWAG__nnUNetPlans_Dropout01__2d'),
     #     use_folds=(0,),
-    #     checkpoint_name='checkpoint_final.pth',
+    #     checkpoint_name='random_weights_custom.pth',
     # )
-    predictor.initialize_from_trained_model_folder(
-        join(nnUNet_results, r'Dataset001_unilateral_axial_only\nnUNetTrainer__nnUNetPlans__3d_fullres'),
-        use_folds=(0,),
-        checkpoint_name='checkpoint_final.pth',
-    )
-    # predictor.predict_from_files(join(nnUNet_raw, 'Dataset003_Liver/imagesTs'),
-    #                              join(nnUNet_raw, 'Dataset003_Liver/imagesTs_predlowres'),
-    #                              save_probabilities=False, overwrite=False,
-    #                              num_processes_preprocessing=2, num_processes_segmentation_export=2,
-    #                              folder_with_segs_from_prev_stage=None, num_parts=1, part_id=0)
+    # # predictor.predict_from_files(join(nnUNet_raw, 'Dataset003_Liver/imagesTs'),
+    # #                              join(nnUNet_raw, 'Dataset003_Liver/imagesTs_predlowres'),
+    # #                              save_probabilities=False, overwrite=False,
+    # #                              num_processes_preprocessing=2, num_processes_segmentation_export=2,
+    # #                              folder_with_segs_from_prev_stage=None, num_parts=1, part_id=0)
+    # #
+    # # # predict a numpy array
+    # # from nnunetv2.imageio.simpleitk_reader_writer import SimpleITKIO
+    # #
+    # # img, props = SimpleITKIO().read_images([join(nnUNet_raw, 'Dataset003_Liver/imagesTr/liver_63_0000.nii.gz')])
+    # # ret = predictor.predict_single_npy_array(img, props, None, None, False)
+    # #
+    # # iterator = predictor.get_data_iterator_from_raw_npy_data([img], None, [props], None, 1)
+    # # ret = predictor.predict_from_data_iterator(iterator, False, 1)
     #
-    # # predict a numpy array
-    # from nnunetv2.imageio.simpleitk_reader_writer import SimpleITKIO
-    #
-    # img, props = SimpleITKIO().read_images([join(nnUNet_raw, 'Dataset003_Liver/imagesTr/liver_63_0000.nii.gz')])
-    # ret = predictor.predict_single_npy_array(img, props, None, None, False)
-    #
-    # iterator = predictor.get_data_iterator_from_raw_npy_data([img], None, [props], None, 1)
-    # ret = predictor.predict_from_data_iterator(iterator, False, 1)
-
+    # # ret = predictor.predict_from_files_sequential(
+    # #     [['/media/isensee/raw_data/nnUNet_raw/Dataset004_Hippocampus/imagesTs/hippocampus_002_0000.nii.gz'], ['/media/isensee/raw_data/nnUNet_raw/Dataset004_Hippocampus/imagesTs/hippocampus_005_0000.nii.gz']],
+    # #     '/home/isensee/temp/tmp', False, True, None
+    # # )
     # ret = predictor.predict_from_files_sequential(
-    #     [['/media/isensee/raw_data/nnUNet_raw/Dataset004_Hippocampus/imagesTs/hippocampus_002_0000.nii.gz'], ['/media/isensee/raw_data/nnUNet_raw/Dataset004_Hippocampus/imagesTs/hippocampus_005_0000.nii.gz']],
-    #     '/home/isensee/temp/tmp', False, True, None
+    #     [[r'C:\Users\Laetitia\Documents\Programming\PdMLaetitia\data_nnUnet_compatible\raw\Dataset100_unilateral_axial_only\imagesTs\DUKE_005_A_0000.nii.gz'], [r'C:\Users\Laetitia\Documents\Programming\PdMLaetitia\data_nnUnet_compatible\raw\Dataset100_unilateral_axial_only\imagesTs\DUKE_021_B_0000.nii.gz']],
+    #     r'C:\Users\Laetitia\Documents\Programming\PdMLaetitia\data_nnUnet_compatible\nnUNet_uncertainty\Dataset100_unilateral_axial_only\normal_predict', False, True, None
     # )
-    ret = predictor.predict_from_files_sequential(
-        [[r'C:\Users\Laetitia\Documents\Programming\PdMLaetitia\data_nnUnet_compatible\raw\Dataset001_unilateral_axial_only\imagesTs\DUKE_005_A_0000.nii.gz'], [r'C:\Users\Laetitia\Documents\Programming\PdMLaetitia\data_nnUnet_compatible\raw\Dataset001_unilateral_axial_only\imagesTs\DUKE_021_B_0000.nii.gz']],
-        r'C:\Users\Laetitia\Documents\Programming\PdMLaetitia\data_nnUnet_compatible\nnUNet_uncertainty\Dataset001_unilateral_axial_only', False, True, None
-    )
 
 
+# adapted from run_training.py
+if __name__ == '__main__':
+    os.environ['OMP_NUM_THREADS'] = '1'
+    os.environ['MKL_NUM_THREADS'] = '1'
+    os.environ['OPENBLAS_NUM_THREADS'] = '1'
+    # reduces the number of threads used for compiling. More threads don't help and can cause problems
+    #os.environ['TORCHINDUCTOR_COMPILE_THREADS'] = 1
+    # multiprocessing.set_start_method("spawn")
+    predict_entry_point()
