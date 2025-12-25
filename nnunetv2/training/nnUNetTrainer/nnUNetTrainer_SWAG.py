@@ -37,3 +37,8 @@ class nnUNetTrainer_SWAG(nnUNetTrainer):
                 self.print_to_log_file(f"[SWAG] Saved snapshot at epoch {self.current_epoch} -> {snapshot_path}")
         super().on_epoch_end()
 
+    def on_validation_epoch_start(self):
+        #todo: is it better to implement MCDropout here or not? NB: mcdropout parameter not yet defined
+        super().on_validation_epoch_start()
+        if self.mcdropout:
+            self.network.module.dropout.train()
