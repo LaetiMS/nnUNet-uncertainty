@@ -1,10 +1,11 @@
-from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
+#from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
+from nnunetv2.training.nnUNetTrainer.variants.lr_schedule.nnUNetTrainer_warmup import nnUNetTrainer_warmup
 from batchgenerators.utilities.file_and_folder_operations import join, maybe_mkdir_p
 import torch
 import os
 
 
-class nnUNetTrainer_SWAG(nnUNetTrainer):
+class nnUNetTrainer_warmup_SWAG(nnUNetTrainer_warmup):
     """
     Saves checkpoints during training to allow performing SWAG:) Other than that the training is not impacted at all
     """
@@ -36,3 +37,22 @@ class nnUNetTrainer_SWAG(nnUNetTrainer):
             if self.local_rank == 0:
                 self.print_to_log_file(f"[SWAG] Saved snapshot at epoch {self.current_epoch} -> {snapshot_path}")
         super().on_epoch_end()
+
+class nnUNetTrainer_warmup_swag1000_tr1200_epochs(nnUNetTrainer_warmup):
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device('cuda')):
+        super().__init__(plans,configuration,fold,dataset_json,device)
+        self.swag_start_epoch = 1000
+        self.swag_interval = 10
+        self.total_epochs = 1200
+
+class nnUNetTrainer_warmup_swag400_tr600_epochs(nnUNetTrainer_warmup):
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device('cuda')):
+        super().__init__(plans,configuration,fold,dataset_json,device)
+        self.swag_start_epoch = 500
+        self.swag_interval = 5
+        self.total_epochs = 600
+
+
+
