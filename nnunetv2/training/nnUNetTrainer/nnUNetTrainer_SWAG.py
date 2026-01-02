@@ -61,6 +61,6 @@ class nnUNetTrainer_TEST_warmup_swag1_tr20_epochs(nnUNetTrainer_warmup_SWAG):
         self.warmup_duration_whole_net = 1
         self.swag_start_epoch = 1
         self.swag_interval = 1
-        self.total_epochs = 20
+        self.num_epochs = 20
 
 
