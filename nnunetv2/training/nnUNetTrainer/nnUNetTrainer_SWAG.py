@@ -54,12 +54,12 @@ class nnUNetTrainer_warmup_swag400_tr600_epochs(nnUNetTrainer_warmup_SWAG):
         self.swag_interval = 5
         self.total_epochs = 600
 
-class nnUNetTrainer_TEST_warmup_swag0_tr20_epochs(nnUNetTrainer_warmup_SWAG):
+class nnUNetTrainer_TEST_warmup_swag1_tr20_epochs(nnUNetTrainer_warmup_SWAG):
     def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
                  device: torch.device = torch.device('cuda')):
         super().__init__(plans,configuration,fold,dataset_json,device)
-        self.warmup_duration_whole_net = 0
-        self.swag_start_epoch = 0
+        self.warmup_duration_whole_net = 1
+        self.swag_start_epoch = 1
         self.swag_interval = 1
         self.total_epochs = 20
 
