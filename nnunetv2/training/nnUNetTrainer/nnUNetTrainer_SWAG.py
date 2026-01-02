@@ -38,7 +38,7 @@ class nnUNetTrainer_warmup_SWAG(nnUNetTrainer_warmup):
                 self.print_to_log_file(f"[SWAG] Saved snapshot at epoch {self.current_epoch} -> {snapshot_path}")
         super().on_epoch_end()
 
-class nnUNetTrainer_warmup_swag1000_tr1200_epochs(nnUNetTrainer_warmup):
+class nnUNetTrainer_warmup_swag1000_tr1200_epochs(nnUNetTrainer_warmup_SWAG):
     def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
                  device: torch.device = torch.device('cuda')):
         super().__init__(plans,configuration,fold,dataset_json,device)
@@ -46,7 +46,7 @@ class nnUNetTrainer_warmup_swag1000_tr1200_epochs(nnUNetTrainer_warmup):
         self.swag_interval = 10
         self.total_epochs = 1200
 
-class nnUNetTrainer_warmup_swag400_tr600_epochs(nnUNetTrainer_warmup):
+class nnUNetTrainer_warmup_swag400_tr600_epochs(nnUNetTrainer_warmup_SWAG):
     def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
                  device: torch.device = torch.device('cuda')):
         super().__init__(plans,configuration,fold,dataset_json,device)
@@ -54,5 +54,13 @@ class nnUNetTrainer_warmup_swag400_tr600_epochs(nnUNetTrainer_warmup):
         self.swag_interval = 5
         self.total_epochs = 600
 
+class nnUNetTrainer_TEST_warmup_swag0_tr20_epochs(nnUNetTrainer_warmup_SWAG):
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device('cuda')):
+        super().__init__(plans,configuration,fold,dataset_json,device)
+        self.warmup_duration_whole_net = 0
+        self.swag_start_epoch = 0
+        self.swag_interval = 1
+        self.total_epochs = 20
 
 
