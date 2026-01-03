@@ -1,5 +1,7 @@
 # wandb logging implementation inspired by : LuxImagingAI/nnUNet-wandb
 # wandb figure implementation inspired by tomDag25 : https://github.com/MIC-DKFZ/nnUNet/issues/2733
+from typing import Union
+
 import torch
 import yaml
 import numpy as np
@@ -8,12 +10,19 @@ import matplotlib.pyplot as plt
 
 from torch import autocast
 from torch.optim import AdamW
+from torch._dynamo import OptimizedModule
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+
 
 from nnunetv2.training.lr_scheduler.polylr import PolyLRScheduler
+from nnunetv2.training.lr_scheduler.warmup import Lin_incr_LRScheduler, PolyLRScheduler_offset
+
 
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 
-from nnunetv2.utilities.helpers import dummy_context
+from nnunetv2.utilities.helpers import dummy_context, empty_cache
+
 from nnunetv2.training.nnUNetTrainer.variants.WandbWrapper import WandbWrapper
 from batchgenerators.utilities.file_and_folder_operations import join, maybe_mkdir_p
 
@@ -58,7 +67,13 @@ def plot_slices_combined(combined, gt, pred, current_epoch, debug=False):
     return fig
 
 
-class nnUNetTrainerWb_SWAG(nnUNetTrainer):
+class nnUNetTrainerWb_SWAG_warmup_optimizer(nnUNetTrainer):
+    """
+    Varies from the traditional nnUNetTrainer by:
+    - Incorporating Wandb logging
+    - Saving checkpoints for SWAG
+    - Allowing to choose between the default or the adamw optimizer -> use_adamw_optimizer
+    """
     def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
                  device: torch.device = torch.device('cuda')):
         # run og nnUNetTrainer initialization as intended
@@ -69,6 +84,19 @@ class nnUNetTrainerWb_SWAG(nnUNetTrainer):
 
         self.use_adamw_optimizer = False
 
+        #### hyperparameters for warmup
+        self.warmup_duration_whole_net = 50  # lin increase whole network, set 0 if no warmup
+        self.training_stage = None  # 'warmup_all', 'train'
+
+        #self._wandb_init()
+    def initialize(self):
+        super().initialize()
+        self._wandb_init()
+
+    def _wandb_init(self) -> None:
+        """
+        used to set the configuration to initialize wandb
+        """
         # Hyperparameters initialization
         yaml_config = dict()
         yaml_config['configuration_name'] = self.configuration_name
@@ -86,13 +114,18 @@ class nnUNetTrainerWb_SWAG(nnUNetTrainer):
         yaml_config['configuration_name'] = self.configuration_name
         yaml_config['dataset_json'] = self.dataset_json
         yaml_config['output_folder'] = self.output_folder
+        yaml_config['network'] = self.network
+        yaml_config['optimizer'] = self.optimizer
+
         yaml_config['swag_start_epoch'] = self.swag_start_epoch
         yaml_config['swag_interval'] = self.swag_interval
-
+        yaml_config['warmup_duration_whole_net'] =self.warmup_duration_whole_net
+        yaml_config['use_adamw_optimizer'] = self.use_adamw_optimizer
 
         # WandbWrapper initialization
         self.wandb = WandbWrapper(use_wandb=yaml_config['wandb_enabled'], config=yaml_config)
         # self.wandb.init()
+
 
     def on_train_start(self):
         super().on_train_start()
@@ -241,8 +274,55 @@ class nnUNetTrainerWb_SWAG(nnUNetTrainer):
             self.on_epoch_end()
 
         self.on_train_end()
-    def configure_optimizers(self):
-        super().configure_optimizers()
+    def configure_optimizers(self, stage: str = "warmup_all"):
+        # adapted from nnUNetTrainer_warmup and integrating possibility for AdamW optimizer from nnUNetTrainerAdam
+        if self.warmup_duration_whole_net != 0:
+            assert stage in ["warmup_all", "train"]
+
+            if self.training_stage == stage:
+                return self.optimizer, self.lr_scheduler
+            if isinstance(self.network, DDP):
+                params = self.network.module.parameters()
+            else:
+                params = self.network.parameters()
+            if stage == "warmup_all":
+                self.print_to_log_file("train whole net, warmup")
+                if self.use_adamw_optimizer:
+                    optimizer = AdamW(params,
+                                      lr=self.initial_lr,
+                                      weight_decay=self.weight_decay,
+                                      amsgrad=True)
+                else:
+                    optimizer = torch.optim.SGD(
+                        params, self.initial_lr, weight_decay=self.weight_decay, momentum=0.99, nesterov=True
+                    )
+                lr_scheduler = Lin_incr_LRScheduler(optimizer, self.initial_lr, self.warmup_duration_whole_net)
+                self.print_to_log_file(
+                    f"Initialized warmup_all optimizer and lr_scheduler at epoch {self.current_epoch}")
+            else:
+                self.print_to_log_file("train whole net, default schedule")
+                if self.training_stage == "warmup_all":
+                    # we can keep the existing optimizer and don't need to create a new one. This will allow us to keep
+                    # the accumulated momentum terms which already point in a useful driection
+                    optimizer = self.optimizer
+                else:
+                    if self.use_adamw_optimizer:
+                        optimizer = AdamW(params,
+                                          lr=self.initial_lr,
+                                          weight_decay=self.weight_decay,
+                                          amsgrad=True)
+                    else:
+                        optimizer = torch.optim.SGD(
+                            params, self.initial_lr, weight_decay=self.weight_decay, momentum=0.99, nesterov=True
+                        )
+                lr_scheduler = PolyLRScheduler_offset(
+                    optimizer, self.initial_lr, self.num_epochs, self.warmup_duration_whole_net
+                )
+                self.print_to_log_file(f"Initialized train optimizer and lr_scheduler at epoch {self.current_epoch}")
+            self.training_stage = stage
+            empty_cache(self.device)
+            return optimizer, lr_scheduler
+
         if self.use_adamw_optimizer:
             # copied from nnUNetTrainerAdam
             optimizer = AdamW(self.network.parameters(),
@@ -253,6 +333,140 @@ class nnUNetTrainerWb_SWAG(nnUNetTrainer):
             #                             momentum=0.99, nesterov=True)
             lr_scheduler = PolyLRScheduler(optimizer, self.initial_lr, self.num_epochs)
             return optimizer, lr_scheduler
+        else:
+            return super().configure_optimizers()
+
+    def load_checkpoint(self, filename_or_checkpoint: Union[dict, str]) -> None:
+        if self.warmup_duration_whole_net != 0:
+            """
+            copied from nnUNetTrainer_warmup.py
+            We need to overwrite that entire function because we need to fiddle the correct optimizer in between
+            loading the checkpoint and applying the optimizer states. Yuck.
+            """
+            if not self.was_initialized:
+                self.initialize()
+
+            if isinstance(filename_or_checkpoint, str):
+                checkpoint = torch.load(filename_or_checkpoint, map_location=self.device)
+            # if state dict comes from nn.DataParallel but we use non-parallel model here then the state dict keys do not
+            # match. Use heuristic to make it match
+            new_state_dict = {}
+            for k, value in checkpoint["network_weights"].items():
+                key = k
+                if key not in self.network.state_dict().keys() and key.startswith("module."):
+                    key = key[7:]
+                new_state_dict[key] = value
+
+            self.my_init_kwargs = checkpoint["init_args"]
+            self.current_epoch = checkpoint["current_epoch"]
+            self.logger.load_checkpoint(checkpoint["logging"])
+            self._best_ema = checkpoint["_best_ema"]
+            self.inference_allowed_mirroring_axes = (
+                checkpoint["inference_allowed_mirroring_axes"]
+                if "inference_allowed_mirroring_axes" in checkpoint.keys()
+                else self.inference_allowed_mirroring_axes
+            )
+
+            # messing with state dict naming schemes. Facepalm.
+            if self.is_ddp:
+                if isinstance(self.network.module, OptimizedModule):
+                    self.network.module._orig_mod.load_state_dict(new_state_dict)
+                else:
+                    self.network.module.load_state_dict(new_state_dict)
+            else:
+                if isinstance(self.network, OptimizedModule):
+                    self.network._orig_mod.load_state_dict(new_state_dict)
+                else:
+                    self.network.load_state_dict(new_state_dict)
+
+            # it's fine to do this every time we load because configure_optimizers will be a no-op if the correct optimizer
+            # and lr scheduler are already set up
+            if self.current_epoch < self.warmup_duration_whole_net:
+                self.optimizer, self.lr_scheduler = self.configure_optimizers("warmup_all")
+            else:
+                self.optimizer, self.lr_scheduler = self.configure_optimizers("train")
+
+            self.optimizer.load_state_dict(checkpoint["optimizer_state"])
+            if self.grad_scaler is not None:
+                if checkpoint["grad_scaler_state"] is not None:
+                    self.grad_scaler.load_state_dict(checkpoint["grad_scaler_state"])
+
+        else:
+            super().load_checkpoint()
+    def on_train_epoch_start(self):
+        # copied from nnUNetTrainer_warmup
+        if self.current_epoch == 0:
+            self.optimizer, self.lr_scheduler = self.configure_optimizers("warmup_all")
+        elif self.current_epoch == self.warmup_duration_whole_net:
+            self.optimizer, self.lr_scheduler = self.configure_optimizers("train")
+
+        super().on_train_epoch_start()
+
+class nnUNetTrainerWb_SWAG_warmup_optimizer_1200ep(nnUNetTrainerWb_SWAG_warmup_optimizer):
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device('cuda')):
+        super().__init__(plans, configuration, fold, dataset_json, device=device)
+        self.num_epochs = 1200
+        self.swag_start_epoch = 900
+
+class nnUNetTrainerWb_SWAG_warmup_AdamW_1200ep(nnUNetTrainerWb_SWAG_warmup_AdamW):
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device('cuda')):
+        super().__init__(plans, configuration, fold, dataset_json, device=device)
+        self.num_epochs = 1200
+        self.swag_start_epoch = 900
+
+
+class nnUNetTrainerWb_SWAG_warmup_AdamW(nnUNetTrainerWb_SWAG_warmup_optimizer):
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device('cuda')):
+        super().__init__(plans, configuration, fold, dataset_json, device=device)
+
+        self.use_adamw_optimizer = True
+
+class nnUNetTrainerWb_SWAG_warmup_AdamW_1200ep(nnUNetTrainerWb_SWAG_warmup_AdamW):
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device('cuda')):
+        super().__init__(plans, configuration, fold, dataset_json, device=device)
+        self.num_epochs = 1200
+        self.swag_start_epoch = 900
+
+
+class nnUNetTrainerWb_SWAG_no_warmup_optimizer(nnUNetTrainerWb_SWAG_warmup_optimizer):
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device('cuda')):
+        super().__init__(plans, configuration, fold, dataset_json, device=device)
+        self.warmup_duration_whole_net = 0
+
+class nnUNetTrainerWb_SWAG_no_warmup_optimizer_1200ep(nnUNetTrainerWb_SWAG_no_warmup_optimizer):
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device('cuda')):
+        super().__init__(plans, configuration, fold, dataset_json, device=device)
+        self.num_epochs = 1200
+        self.swag_start_epoch = 900
+
+
+class nnUNetTrainerWb_SWAG_no_warmup_AdamW(nnUNetTrainerWb_SWAG_warmup_optimizer):
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device('cuda')):
+        super().__init__(plans, configuration, fold, dataset_json, device=device)
+        self.warmup_duration_whole_net = 0
+        self.use_adamw_optimizer = True
+
+class nnUNetTrainerWb_SWAG_no_warmup_AdamW_1200ep(nnUNetTrainerWb_SWAG_no_warmup_AdamW):
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device('cuda')):
+        super().__init__(plans, configuration, fold, dataset_json, device=device)
+        self.num_epochs = 1200
+        self.swag_start_epoch = 900
+
+
+
+
+
+
+
+
 
 
 
