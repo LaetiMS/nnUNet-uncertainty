@@ -58,24 +58,23 @@ class nnUNetTrainerCustom(nnUNetTrainer):
         # run og nnUNetTrainer initialization as intended
         super().__init__(plans, configuration, fold, dataset_json, device = device)
 
-        # wandb extension (overwrite parameters)
-
         # Hyperparameters initialization
-        config_path = files("nnunetv2.training.nnUNetTrainer").joinpath("config.yaml")
-        with open(config_path) as f:
-            yaml_config = yaml.safe_load(f)
-
-        yaml_config['architecture'] = configuration
-        yaml_config['fold'] = fold
-        self.num_epochs = yaml_config['num_epochs']
-        self.initial_lr = yaml_config['initial_lr']
-        self.weight_decay = yaml_config['weight_decay']
-        self.num_iterations_per_epoch = yaml_config['num_iterations_per_epoch']
-        self.num_val_iterations_per_epoch = yaml_config['num_val_iterations_per_epoch']
-        self.oversample_foreground_percent = yaml_config['oversample_foreground_percent']
-        self.probabilistic_oversampling = yaml_config['probabilistic_oversampling']
-        self.enable_deep_supervision = yaml_config['enable_deep_supervision']
-        #self.current_epoch = 0  ## Dynamic variable not stored in yaml config
+        yaml_config = dict()
+        yaml_config['configuration_name'] = self.configuration_name
+        yaml_config['fold'] = self.fold
+        yaml_config['num_epochs'] = self.num_epochs
+        yaml_config['initial_lr'] = self.initial_lr
+        yaml_config['weight_decay'] = self.weight_decay
+        yaml_config['num_iterations_per_epoch'] = self.num_iterations_per_epoch
+        yaml_config['num_val_iterations_per_epoch'] = self.num_val_iterations_per_epoch
+        yaml_config['oversample_foreground_percent'] = self.oversample_foreground_percent
+        yaml_config['probabilistic_oversampling'] = self.probabilistic_oversampling
+        yaml_config['enable_deep_supervision'] = self.enable_deep_supervision
+        yaml_config['plans_manager'] = self.plans_manager
+        yaml_config['configuration_manager'] = self.configuration_manager
+        yaml_config['configuration_name'] = self.configuration_name
+        yaml_config['dataset_json'] = self.dataset_json
+        yaml_config['output_folder'] = self.output_folder
 
         # WandbWrapper initialization
         self.wandb = WandbWrapper(use_wandb=yaml_config['wandb_enabled'], config=yaml_config)
@@ -118,7 +117,7 @@ class nnUNetTrainerCustom(nnUNetTrainer):
             l = self.loss(output, target)
 
             # only modification to train_stp to plot middle slices and save to wandb only for the first batch_id
-            if is_main_process() and batch_id == 0:
+            if is_main_process() and batch_id == 0 and self.configuration_name == '3d_fullres':
                 train_image = data[0].detach().cpu().squeeze().float().numpy()
                 train_gt = target[0].detach().cpu().squeeze().float().numpy()[0]
                 train_pred = np.argmax(output[0].detach().cpu().squeeze().numpy(), axis=1)[0]
