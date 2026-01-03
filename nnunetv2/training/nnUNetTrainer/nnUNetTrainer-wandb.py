@@ -7,10 +7,16 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from torch import autocast
+from torch.optim import AdamW
+
+from nnunetv2.training.lr_scheduler.polylr import PolyLRScheduler
+
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 
 from nnunetv2.utilities.helpers import dummy_context
 from nnunetv2.training.nnUNetTrainer.variants.WandbWrapper import WandbWrapper
+from batchgenerators.utilities.file_and_folder_operations import join, maybe_mkdir_p
+
 from importlib.resources import files
 
 
@@ -52,11 +58,16 @@ def plot_slices_combined(combined, gt, pred, current_epoch, debug=False):
     return fig
 
 
-class nnUNetTrainerCustom(nnUNetTrainer):
+class nnUNetTrainerWb_SWAG(nnUNetTrainer):
     def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
                  device: torch.device = torch.device('cuda')):
         # run og nnUNetTrainer initialization as intended
         super().__init__(plans, configuration, fold, dataset_json, device = device)
+        # swag parameters
+        self.swag_start_epoch = 800
+        self.swag_interval = 10
+
+        self.use_adamw_optimizer = False
 
         # Hyperparameters initialization
         yaml_config = dict()
@@ -75,6 +86,9 @@ class nnUNetTrainerCustom(nnUNetTrainer):
         yaml_config['configuration_name'] = self.configuration_name
         yaml_config['dataset_json'] = self.dataset_json
         yaml_config['output_folder'] = self.output_folder
+        yaml_config['swag_start_epoch'] = self.swag_start_epoch
+        yaml_config['swag_interval'] = self.swag_interval
+
 
         # WandbWrapper initialization
         self.wandb = WandbWrapper(use_wandb=yaml_config['wandb_enabled'], config=yaml_config)
@@ -146,6 +160,25 @@ class nnUNetTrainerCustom(nnUNetTrainer):
 
 
     def on_epoch_end(self):
+        # SWAG snapshots (inspired by save_checkpointing -> but as it is by default disabled -> didnt want to reuse fucntion)
+        if self.current_epoch >= self.swag_start_epoch and (self.current_epoch - self.swag_start_epoch) % self.swag_interval == 0:
+
+            # Ensure SWAG folder exists
+            swag_dir = join(self.output_folder, "swag_snapshots")
+            maybe_mkdir_p(swag_dir)
+
+            # Define snapshot path
+            snapshot_path = join(swag_dir, f"epoch_{self.current_epoch}.pth")
+            #old: snapshot_path = join(self.output_folder, f'swag_snapshot_epoch_{self.current_epoch}.pth')
+
+            if self.is_ddp:
+                torch.save(self.network.module.state_dict(), snapshot_path)
+            else:
+                torch.save(self.network.state_dict(), snapshot_path)
+            if self.local_rank == 0:
+                self.print_to_log_file(f"[SWAG] Saved snapshot at epoch {self.current_epoch} -> {snapshot_path}")
+
+        #wandb logging
         if is_main_process():
             self.wandb.log({"epoch": self.current_epoch, "val_loss": self.logger.my_fantastic_logging['val_losses'][-1],
                             "training_loss": self.logger.my_fantastic_logging['train_losses'][-1],
@@ -208,7 +241,18 @@ class nnUNetTrainerCustom(nnUNetTrainer):
             self.on_epoch_end()
 
         self.on_train_end()
-
+    def configure_optimizers(self):
+        super().configure_optimizers()
+        if self.use_adamw_optimizer:
+            # copied from nnUNetTrainerAdam
+            optimizer = AdamW(self.network.parameters(),
+                              lr=self.initial_lr,
+                              weight_decay=self.weight_decay,
+                              amsgrad=True)
+            # optimizer = torch.optim.SGD(self.network.parameters(), self.initial_lr, weight_decay=self.weight_decay,
+            #                             momentum=0.99, nesterov=True)
+            lr_scheduler = PolyLRScheduler(optimizer, self.initial_lr, self.num_epochs)
+            return optimizer, lr_scheduler
 
 
 
