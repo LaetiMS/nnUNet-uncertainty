@@ -100,7 +100,7 @@ class nnUNetTrainerWb_SWAG_warmup_optimizer(nnUNetTrainer):
         # Hyperparameters initialization
         yaml_config = dict()
 
-        yaml_config['project_name'] = "Project Name"
+        yaml_config['project_name'] = "PdM"
         yaml_config['dataset_name'] = "MM"
         yaml_config['wandb_enabled'] = 1
         yaml_config['architecture'] = self.configuration_name
