@@ -99,6 +99,7 @@ class nnUNetTrainerWb_SWAG_warmup_optimizer(nnUNetTrainer):
         """
         # Hyperparameters initialization
         yaml_config = dict()
+        yaml_config['wandb_enabled'] = True
         yaml_config['configuration_name'] = self.configuration_name
         yaml_config['fold'] = self.fold
         yaml_config['num_epochs'] = self.num_epochs
