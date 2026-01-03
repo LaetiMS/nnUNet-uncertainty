@@ -99,8 +99,11 @@ class nnUNetTrainerWb_SWAG_warmup_optimizer(nnUNetTrainer):
         """
         # Hyperparameters initialization
         yaml_config = dict()
-        yaml_config['wandb_enabled'] = True
-        yaml_config['configuration_name'] = self.configuration_name
+
+        yaml_config['project_name'] = "Project Name"
+        yaml_config['dataset_name'] = "MM"
+        yaml_config['wandb_enabled'] = 1
+        yaml_config['architecture'] = self.configuration_name
         yaml_config['fold'] = self.fold
         yaml_config['num_epochs'] = self.num_epochs
         yaml_config['initial_lr'] = self.initial_lr
