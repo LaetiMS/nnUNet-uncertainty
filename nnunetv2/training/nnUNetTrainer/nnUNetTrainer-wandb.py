@@ -217,13 +217,13 @@ class nnUNetTrainerWb_SWAG_warmup_optimizer(nnUNetTrainer):
 
         #wandb logging
         if is_main_process():
-            self.wandb.log({"epoch": self.current_epoch, "val_loss": self.logger.my_fantastic_logging['val_losses'][-1],
-                            "training_loss": self.logger.my_fantastic_logging['train_losses'][-1],
-                            "lr": self.optimizer.param_groups[0]['lr']})
+
 
             all_dice = [np.round(i, decimals=4) for i in self.logger.my_fantastic_logging['dice_per_class_or_region'][-1]]
             dice_val = np.average(all_dice)  # exclude background in the average dice
-            self.wandb.log({"Average Dice": np.round(dice_val, decimals=4)})
+            self.wandb.log({"epoch": self.current_epoch, "val_loss": self.logger.my_fantastic_logging['val_losses'][-1],
+                            "training_loss": self.logger.my_fantastic_logging['train_losses'][-1],
+                            "lr": self.optimizer.param_groups[0]['lr'], "Average Dice": np.round(dice_val, decimals=4)})
 
             for label_name, label_idx in self.dataset_json['labels'].items():
                 # Skip the 'background' or any label with index 0
@@ -236,10 +236,10 @@ class nnUNetTrainerWb_SWAG_warmup_optimizer(nnUNetTrainer):
                 if 0 <= all_dice_idx < len(all_dice):
                     dice_score = np.round(all_dice[all_dice_idx], decimals=4)
 
-                    self.wandb.log({f"{label_name} Dice": dice_score})
+                    self.wandb.log({"epoch": self.current_epoch, f"{label_name} Dice": dice_score})
             # handle 'best' checkpointing. ema_fg_dice is computed by the logger and can be accessed like this
             if self._best_ema is None or self.logger.my_fantastic_logging['ema_fg_dice'][-1] > self._best_ema:
-                self.wandb.log({"best EMA pseudo Dice": self._best_ema})
+                self.wandb.log({"epoch": self.current_epoch, "best EMA pseudo Dice": self._best_ema})
 
         super().on_epoch_end() # added at the end, cause at end of on_epoch_end self.current_epoch += 1
 
