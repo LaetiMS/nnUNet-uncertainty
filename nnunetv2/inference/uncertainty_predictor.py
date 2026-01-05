@@ -442,6 +442,78 @@ class UncertaintyPredictor(nnUNetPredictor):
         torch.set_num_threads(n_threads)
         return logits_samples
 
+    def predict_from_files_uncertainty(
+            # mirror of predict_from_files
+            self,
+            list_of_lists_or_source_folder:
+            Union[str, List[List[str]]],
+            output_folder_or_list_of_truncated_output_files: Union[str, None, List[str]],
+            save_probabilities: bool = False,
+            overwrite: bool = True,
+            num_processes_preprocessing: int = default_num_processes,
+            num_processes_segmentation_export: int = default_num_processes,
+            folder_with_segs_from_prev_stage: str = None,
+            num_parts: int = 1,
+            part_id: int = 0
+    ):
+        """
+        Uncertainty-aware prediction entry point.
+        Mirrors predict_from_files, but uses uncertainty inference + export.
+        Only difference to predict_from_files -> final return calls uncertainty equivalent method!
+        """
+
+        assert part_id <= num_parts, ("Part ID must be smaller than num_parts. Remember that we start counting with 0. "
+                                      "So if there are 3 parts then valid part IDs are 0, 1, 2")
+        if isinstance(output_folder_or_list_of_truncated_output_files, str):
+            output_folder = output_folder_or_list_of_truncated_output_files
+        elif isinstance(output_folder_or_list_of_truncated_output_files, list):
+            output_folder = os.path.dirname(output_folder_or_list_of_truncated_output_files[0])
+        else:
+            output_folder = None
+
+        ########################
+        # let's store the input arguments so that its clear what was used to generate the prediction
+        if output_folder is not None:
+            my_init_kwargs = {}
+            for k in inspect.signature(self.predict_from_files).parameters.keys():
+                my_init_kwargs[k] = locals()[k]
+            my_init_kwargs = deepcopy(
+                my_init_kwargs)  # let's not unintentionally change anything in-place. Take this as a
+            recursive_fix_for_json_export(my_init_kwargs)
+            maybe_mkdir_p(output_folder)
+            save_json(my_init_kwargs, join(output_folder, 'predict_from_raw_data_args.json'))
+
+            # we need these two if we want to do things with the predictions like for example apply postprocessing
+            save_json(self.dataset_json, join(output_folder, 'dataset.json'), sort_keys=False)
+            save_json(self.plans_manager.plans, join(output_folder, 'plans.json'), sort_keys=False)
+        #######################
+
+        # check if we need a prediction from the previous stage
+        if self.configuration_manager.previous_stage_name is not None:
+            assert folder_with_segs_from_prev_stage is not None, \
+                f'The requested configuration is a cascaded network. It requires the segmentations of the previous ' \
+                f'stage ({self.configuration_manager.previous_stage_name}) as input. Please provide the folder where' \
+                f' they are located via folder_with_segs_from_prev_stage'
+
+        # sort out input and output filenames
+        list_of_lists_or_source_folder, output_filename_truncated, seg_from_prev_stage_files = \
+            self._manage_input_and_output_lists(list_of_lists_or_source_folder,
+                                                output_folder_or_list_of_truncated_output_files,
+                                                folder_with_segs_from_prev_stage, overwrite, part_id, num_parts,
+                                                save_probabilities)
+        if len(list_of_lists_or_source_folder) == 0:
+            return
+
+        data_iterator = self._internal_get_data_iterator_from_lists_of_filenames(list_of_lists_or_source_folder,
+                                                                                 seg_from_prev_stage_files,
+                                                                                 output_filename_truncated,
+                                                                                 num_processes_preprocessing)
+
+        return self.predict_from_data_iterator_uncertainty(
+            data_iterator,
+            save_probabilities=save_probabilities
+        )
+
 
 class UncertaintyPredictor(nnUNetPredictor):
     """
