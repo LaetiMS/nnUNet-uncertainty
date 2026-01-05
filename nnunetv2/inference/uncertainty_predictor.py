@@ -5,12 +5,375 @@ from typing import Tuple, Union, List, Optional
 import numpy as np
 import torch
 from acvl_utils.cropping_and_padding.padding import pad_nd_image
+from sympy.multipledispatch.dispatcher import RaiseNotImplementedError
 from torch import nn
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor, _getDefaultValue
 from batchgenerators.utilities.file_and_folder_operations import subfiles, load_json, join, isfile, maybe_mkdir_p, isdir, subdirs, \
     save_json
+from batchgeneratorsv2.transforms.intensity.gamma import GammaTransform
+from batchgeneratorsv2.transforms.intensity.gaussian_noise import GaussianNoiseTransform
+
 from nnunetv2.utilities.helpers import empty_cache, dummy_context
 from nnunetv2.utilities.file_path_utilities import get_output_folder
+
+from glob import glob
+
+class MCDropoutPredictor(nnUNetPredictor):
+    def __init__(self,
+                 tile_step_size: float = 0.5,
+                 use_gaussian: bool = True,
+                 use_mirroring: bool = True,
+                 perform_everything_on_device: bool = True,
+                 device: torch.device = torch.device('cuda'),
+                 verbose: bool = False,
+                 verbose_preprocessing: bool = False,
+                 allow_tqdm: bool = True):
+        super().__init__(tile_step_size,use_gaussian,use_mirroring,perform_everything_on_device, device, verbose, verbose_preprocessing, allow_tqdm)
+        self.enable_mc_dropout = True
+    @torch.inference_mode()
+    def predict_sliding_window_return_logits(self, input_image: torch.Tensor) \
+            -> Union[np.ndarray, torch.Tensor]:
+        assert isinstance(input_image, torch.Tensor)
+        self.network = self.network.to(self.device)
+        self.network.eval()
+
+        # added for dropout
+        if self.enable_mc_dropout:
+            for m in self.network.modules():
+                if isinstance(m, (nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
+                    m.train()
+
+
+        empty_cache(self.device)
+
+        # Autocast can be annoying
+        # If the device_type is 'cpu' then it's slow as heck on some CPUs (no auto bfloat16 support detection)
+        # and needs to be disabled.
+        # If the device_type is 'mps' then it will complain that mps is not implemented, even if enabled=False
+        # is set. Whyyyyyyy. (this is why we don't make use of enabled=False)
+        # So autocast will only be active if we have a cuda device.
+        with torch.autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
+            assert input_image.ndim == 4, 'input_image must be a 4D np.ndarray or torch.Tensor (c, x, y, z)'
+
+            if self.verbose:
+                print(f'Input shape: {input_image.shape}')
+                print("step_size:", self.tile_step_size)
+                print("mirror_axes:", self.allowed_mirroring_axes if self.use_mirroring else None)
+
+            # if input_image is smaller than tile_size we need to pad it to tile_size.
+            data, slicer_revert_padding = pad_nd_image(input_image, self.configuration_manager.patch_size,
+                                                       'constant', {'value': 0}, True,
+                                                       None)
+
+            slicers = self._internal_get_sliding_window_slicers(data.shape[1:])
+
+            if self.perform_everything_on_device and self.device != 'cpu':
+                # we need to try except here because we can run OOM in which case we need to fall back to CPU as a results device
+                try:
+                    predicted_logits = self._internal_predict_sliding_window_return_logits(data, slicers,
+                                                                                           self.perform_everything_on_device)
+                except RuntimeError:
+                    print(
+                        'Prediction on device was unsuccessful, probably due to a lack of memory. Moving results arrays to CPU')
+                    empty_cache(self.device)
+                    predicted_logits = self._internal_predict_sliding_window_return_logits(data, slicers, False)
+            else:
+                predicted_logits = self._internal_predict_sliding_window_return_logits(data, slicers,
+                                                                                       self.perform_everything_on_device)
+
+            empty_cache(self.device)
+            # revert padding
+            predicted_logits = predicted_logits[(slice(None), *slicer_revert_padding[1:])]
+        return predicted_logits
+
+class TTAextendedPredictor(nnUNetPredictor):
+    def __init__(self,
+                 tile_step_size: float = 0.5,
+                 use_gaussian: bool = True,
+                 use_mirroring: bool = True,
+                 perform_everything_on_device: bool = True,
+                 device: torch.device = torch.device('cuda'),
+                 verbose: bool = False,
+                 verbose_preprocessing: bool = False,
+                 allow_tqdm: bool = True,
+                 noise_variance=(0.0, 0.03), # added
+                 gamma_range=(0.9, 1.1) # added
+                 ):
+        super().__init__(tile_step_size,use_gaussian,use_mirroring,perform_everything_on_device, device, verbose, verbose_preprocessing, allow_tqdm)
+        self.enable_TTA_extended = True
+        # default --> disable TTA --> self.use_mirroring = not args.disable_tta
+
+        # stochastic, image-only TTAs
+        self.noise_tf = GaussianNoiseTransform(
+            noise_variance=noise_variance,
+            p_per_channel=1.0,
+            synchronize_channels=True
+        )
+
+        self.gamma_tf = GammaTransform(
+            gamma=gamma_range,
+            p_invert_image=0,
+            synchronize_channels=True,
+            p_per_channel=1.0,
+            p_retain_stats=True
+        )
+
+
+    def _apply_stochastic_tta(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply weak stochastic augmentations.
+        Expects x as torch.Tensor [B, C, ...]
+        """
+        data = {"image": x}
+
+        # sample independently each call
+        if torch.rand(1).item() < 0.5:
+            data = self.noise_tf(data)
+        if torch.rand(1).item() < 0.5:
+            data = self.gamma_tf(data)
+
+        return data["image"]
+
+    @torch.inference_mode()
+    def _internal_maybe_mirror_and_predict(self, x: torch.Tensor) -> torch.Tensor:
+        # 1. original prediction
+        prediction = super()._internal_maybe_mirror_and_predict(x)
+
+        # 2. stochastic TTA (use batchgeneratorsv2)
+
+        if self.enable_TTA_extended:
+            # maybe add separate TTA extendors --> we can run multiple and see how well each augmentation explains uncertainties
+            xt = self._apply_stochastic_tta(x)
+            # call original nnUNet mirroring logic
+            prediction = super()._internal_maybe_mirror_and_predict(xt)
+
+        return prediction
+        mirror_axes = self.allowed_mirroring_axes if self.use_mirroring else None
+        prediction = self.network(x)
+
+        if mirror_axes is not None:
+            # check for invalid numbers in mirror_axes
+            # x should be 5d for 3d images and 4d for 2d. so the max value of mirror_axes cannot exceed len(x.shape) - 3
+            assert max(mirror_axes) <= x.ndim - 3, 'mirror_axes does not match the dimension of the input!'
+
+            mirror_axes = [m + 2 for m in mirror_axes]
+            axes_combinations = [
+                c for i in range(len(mirror_axes)) for c in itertools.combinations(mirror_axes, i + 1)
+            ]
+            for axes in axes_combinations:
+                prediction += torch.flip(self.network(torch.flip(x, axes)), axes)
+            prediction /= (len(axes_combinations) + 1)
+
+        return prediction
+
+
+class SWAGPredictor(nnUNetPredictor):
+
+    def predict_with_swag(
+            predictor,
+            model_folder,
+            fold,
+            swag_checkpoints,
+            data
+    ):
+        all_logits = []
+
+        for ckpt in swag_checkpoints:
+            predictor.initialize_from_trained_model_folder(
+                model_folder,
+                fold,
+                checkpoint_name=ckpt
+            )
+
+            logits = predictor.predict_sliding_window_return_logits(data)
+            all_logits.append(logits)
+
+        return torch.stack(all_logits, dim=0)  # [S, C, ...]
+
+class UncertaintyPredictor(nnUNetPredictor):
+    """
+    NB: when predicting on test set BLANK is used, when predicting the final validation manual_initalization is used.
+    Notice that self.list_of_parameters is None in that case as self.network in the trainer is already a nn.Module.
+    When initializing the predictor for the test prediction, the model is loaded from a checkpoint containing weights.
+    Hence, why in predict_logits_from_preprocessed_data they are unpacked see; self.network.load_state_dict!
+    See also function perform_actual_validation in Trainer to see how the predictor is initialized.
+
+    overwrites every nnUNetPredictor function calling export_prediction_from_logits with export_uncertainty_from_logits
+    - predict_from_files
+    -- predict_from_data_iterator
+    --- predict_logits_from_preprocessed_data -> predict_logits_from_preprocessed_data_uncertainty
+        ---- predict_sliding_window_return_logits
+    --- export_prediction_from_logits -> export_uncertainty_from_logits
+        ---- convert_predicted_logits_to_segmentation_with_correct_shape (unchanged)
+    --- convert_predicted_logits_to_segmentation_with_correct_shape (unchanged)
+    (- predict_single_npy_array) -> never used irrelevant
+        -- predict_logits_from_preprocessed_data
+        -- export_prediction_from_logits
+        -- convert_predicted_logits_to_segmentation_with_correct_shape
+    (- predict_from_list_of_npy_arrays --> no change needed as change is in predict_from_data_iterator)
+    """
+    def __init__(self,
+                 tile_step_size: float = 0.5,
+                 use_gaussian: bool = True,
+                 use_mirroring: bool = True,
+                 perform_everything_on_device: bool = True,
+                 device: torch.device = torch.device('cuda'),
+                 verbose: bool = False,
+                 verbose_preprocessing: bool = False,
+                 allow_tqdm: bool = True
+                 ):
+        super().__init__(tile_step_size,use_gaussian,use_mirroring,perform_everything_on_device, device, verbose, verbose_preprocessing, allow_tqdm)
+    def initialize_from_trained_model_folder(self, model_training_output_dir: str,
+                                             use_folds: Union[Tuple[Union[int, str]], None],
+                                             checkpoint_name: str = 'checkpoint_final.pth'):
+        """
+        This is used when making predictions with a trained model.
+        - addition: the weights of all swag_snapshots/checkpoints are added to the list_of_parameters. Currently the checkpoint_final.pth is crucial. 1. Because my training didnt save the final checkpoint in swag_snapshots (cause i did 800 to 1000, instead of 799 to 999).
+            Note it exploits how the weights of the different folds would be added!
+        """
+        if self.enable_swag_predict:
+            if checkpoint_name is 'checkpoint_final.pth':
+                if use_folds is None:
+                    use_folds = nnUNetPredictor.auto_detect_available_folds(model_training_output_dir, checkpoint_name)
+
+                if isinstance(use_folds, str):
+                    use_folds = [use_folds]
+
+                if len(use_folds) != 0 and use_folds[0] != 'all':
+                    f = int(use_folds[0])
+                    parameters = []
+                    fold_dir = join(model_training_output_dir, f'fold_{f}')
+
+                    # --- load SWAG snapshots ---
+                    swag_snapshots_path = join(fold_dir, 'swag_snapshots')
+                    # check if path exists
+                    if isdir(swag_snapshots_path):
+                        swag_files = sorted(glob(join(swag_snapshots_path, 'epochs_*.pth')))
+                        if len(swag_files) == 0:
+                            raise RuntimeError(f"No SWAG snapshots found in {swag_snapshots_path}")
+                        else:
+                            swag_checkpoints = [torch.load(swag_ckpt,
+                                                           map_location=torch.device('cpu'), weights_only=False)[
+                                                    'network_weights'] for swag_ckpt in swag_files]
+                            parameters.extend(swag_checkpoints)
+
+                    # --- load final checkpoint ---
+                    final_ckpt = torch.load(join(fold_dir, checkpoint_name), map_location=torch.device('cpu'), weights_only=False)
+                    parameters.append(final_ckpt['network_weights'])
+
+                    trainer_name = final_ckpt['trainer_name']
+                    configuration_name = final_ckpt['init_args']['configuration']
+                    inference_allowed_mirroring_axes = final_ckpt['inference_allowed_mirroring_axes'] if \
+                        'inference_allowed_mirroring_axes' in final_ckpt.keys() else None
+
+                    dataset_json = load_json(join(model_training_output_dir, 'dataset.json'))
+                    plans = load_json(join(model_training_output_dir, 'plans.json'))
+                    plans_manager = PlansManager(plans)
+
+                    configuration_manager = plans_manager.get_configuration(configuration_name)
+                    # restore network
+                    num_input_channels = determine_num_input_channels(plans_manager, configuration_manager, dataset_json)
+                    trainer_class = recursive_find_python_class(join(nnunetv2.__path__[0], "training", "nnUNetTrainer"),
+                                                                trainer_name, 'nnunetv2.training.nnUNetTrainer')
+                    if trainer_class is None:
+                        raise RuntimeError(
+                            f'Unable to locate trainer class {trainer_name} in nnunetv2.training.nnUNetTrainer. '
+                            f'Please place it there (in any .py file)!')
+                    network = trainer_class.build_network_architecture(
+                        configuration_manager.network_arch_class_name,
+                        configuration_manager.network_arch_init_kwargs,
+                        configuration_manager.network_arch_init_kwargs_req_import,
+                        num_input_channels,
+                        plans_manager.get_label_manager(dataset_json).num_segmentation_heads,
+                        enable_deep_supervision=False
+                    )
+
+                    self.plans_manager = plans_manager
+                    self.configuration_manager = configuration_manager
+                    self.list_of_parameters = parameters
+
+                    # initialize network with first set of parameters, also see https://github.com/MIC-DKFZ/nnUNet/issues/2520
+                    network.load_state_dict(parameters[0])
+
+                    self.network = network
+
+                    self.dataset_json = dataset_json
+                    self.trainer_name = trainer_name
+                    self.allowed_mirroring_axes = inference_allowed_mirroring_axes
+                    self.label_manager = plans_manager.get_label_manager(dataset_json)
+                    if ('nnUNet_compile' in os.environ.keys()) and (
+                            os.environ['nnUNet_compile'].lower() in ('true', '1', 't')) \
+                            and not isinstance(self.network, OptimizedModule):
+                        print('Using torch.compile')
+                        self.network = torch.compile(self.network)
+                else:
+                    RaiseNotImplementedError('swag predictions can only be run one fold at the time, it is currently not implemented for multiple folds')
+
+            else:
+                # todo: fix this issue .... by retraining my models
+                RaiseNotImplementedError(
+                    'swag predictions currently requires the checkpoint by default to be checkpoint_final (this is because in my runs the last checkpoint was not recorded, ... oups)')
+
+        else:
+            super().initialize_from_trained_model_folder(model_training_output_dir, use_folds, checkpoint_name)
+
+
+
+
+    def predict_from_data_iterator_uncertainty(
+            self,
+            data_iterator,
+            num_processes_segmentation_export=default_num_processes
+    ):
+        for preprocessed in data_iterator:
+            data = preprocessed["data"]
+            ofile = preprocessed["ofile"]
+            properties = preprocessed["data_properties"]
+
+            logits_samples = self.predict_logits_from_preprocessed_data_uncertainty(data)
+
+            export_uncertainty_from_logits(
+                logits_samples,
+                properties,
+                self.configuration_manager,
+                self.plans_manager,
+                self.dataset_json,
+                ofile
+            )
+
+    @torch.inference_mode()
+    def predict_logits_from_preprocessed_data_with_uncertainty(
+            self, data: torch.Tensor, mc_dropout: bool = True
+    ) -> torch.Tensor:
+        """
+        Returns: logits_samples: [S, C, ...], where S is the number of stochastic forward passes
+        """
+        n_threads = torch.get_num_threads()
+        torch.set_num_threads(default_num_processes if default_num_processes < n_threads else n_threads)
+
+        logits_samples = []
+
+        for params in self.list_of_parameters:  # e.g., your SWAG snapshots
+            # load state dict
+            if not isinstance(self.network, OptimizedModule):
+                self.network.load_state_dict(params)
+            else:
+                self.network._orig_mod.load_state_dict(params)
+
+            if mc_dropout:
+                self.network.train()  # enable dropout at inference
+            else:
+                self.network.eval()
+
+            # sliding window forward
+            logits = self.predict_sliding_window_return_logits(data).to('cpu')
+            logits_samples.append(logits)
+
+        logits_samples = torch.stack(logits_samples)  # shape [S, C, ...]
+
+        torch.set_num_threads(n_threads)
+        return logits_samples
+
 
 class UncertaintyPredictor(nnUNetPredictor):
     """
@@ -146,6 +509,23 @@ class UncertaintyPredictor(nnUNetPredictor):
     #     if allow_compile:
     #         print('Using torch.compile')
     #         self.network = torch.compile(self.network)
+    def predict_logits_from_preprocessed_data(self, data):
+        """
+        This is where:
+            folds are iterated
+            predictions are averaged
+            sliding window is applied
+            👉 Override or wrap this function
+        :param data:
+        :return:
+        """
+        raise NotImplementedError
+
+    def aggregate_predictions(self, preds: torch.Tensor):
+        """
+        preds: (N, C, X, Y, Z)
+        returns: mean_logits, uncertainty_dict
+        """
 
     @torch.inference_mode()
     def predict_sliding_window_return_logits(self, input_image: torch.Tensor) \
@@ -342,6 +722,8 @@ def predict_entry_point_custom():
                         help='Set this flag to disable progress bar. Recommended for HPC environments (non interactive '
                              'jobs)')
     # new
+    parser.add_argument('--activate_swag_predict', action='store_true', required=False, default=False,
+                        help='Set this flag to predict for each checkpoint saved in swag_snapshots. ')
     parser.add_argument('--activate_dropout_prediction', action='store_true', required=False, default=False,
                         help='Set this flag to activate dropout during the prediction.')
     parser.add_argument('--activate_extended_TTA', action='store_true', required=False, default=False,
@@ -393,7 +775,11 @@ def predict_entry_point_custom():
                                 verbose_preprocessing=args.verbose,
                                 allow_tqdm=not args.disable_progress_bar,
                                 enable_mc_dropout=args.activate_dropout_prediction, # added
+                                enable_extended_TTA=args.activate_extended_TTA,
+                                enable_layered_ensembles=args.activate_layered_ensembles,
+                                # enable_swag=args.activate_swag_predict
                                 )
+    #todo: here
     predictor.initialize_from_trained_model_folder(
         model_folder,
         args.f,
@@ -418,6 +804,45 @@ def predict_entry_point_custom():
                                      folder_with_segs_from_prev_stage=args.prev_stage_predictions,
                                      num_parts=args.num_parts,
                                      part_id=args.part_id)
+
+    if args.activate_swag_predict:
+        swag_ckpts = sorted(
+            glob(join(model_folder, f"fold_{args.f}", "swag_snapshots", "epoch_*.pth"))
+        )
+
+        # convert absolute paths → relative paths expected by nnUNet
+        swag_ckpts = [
+            ckpt.split(f"fold_{args.f}/")[-1]
+            for ckpt in swag_ckpts
+        ]
+
+        checkpoint_names = [args.chk] + swag_ckpts
+
+        for checkpoint_name in checkpoint_names:
+            predictor.initialize_from_trained_model_folder(
+                model_folder,
+                args.f,
+                checkpoint_name=checkpoint_name
+            )
+            if run_sequential:
+
+                print("Running in non-multiprocessing mode")
+                output_path = os.path.join(args.o, f"fold_{args.f}", "swag_snapshots")
+                predictor.predict_from_files_sequential(args.i, args.o, save_probabilities=args.save_probabilities,
+                                                        overwrite=not args.continue_prediction,
+                                                        folder_with_segs_from_prev_stage=args.prev_stage_predictions)
+
+            else:
+
+                predictor.predict_from_files(args.i, args.o, save_probabilities=args.save_probabilities,
+                                             overwrite=not args.continue_prediction,
+                                             num_processes_preprocessing=args.npp,
+                                             num_processes_segmentation_export=args.nps,
+                                             folder_with_segs_from_prev_stage=args.prev_stage_predictions,
+                                             num_parts=args.num_parts,
+                                             part_id=args.part_id)
+
+
 
     # r = predict_from_raw_data(args.i,
     #                           args.o,
