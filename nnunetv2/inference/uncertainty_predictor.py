@@ -325,51 +325,119 @@ class UncertaintyPredictor(nnUNetPredictor):
             data_iterator,
             num_processes_segmentation_export=default_num_processes
     ):
+        """
+        Uncertainty-aware prediction.
+        Each element returned by data_iterator must be a dict with keys:
+            - 'data'
+            - 'ofile'
+            - 'data_properties'
+        If 'ofile' is None, the result will be returned instead of written to a file
+
+        This function:
+          - runs SWAG / MC Dropout / TTA inference
+          - aggregates uncertainty on the main process
+          - exports segmentation + uncertainty maps
+        """
+
+        results = [] # r
+
         for preprocessed in data_iterator:
-            data = preprocessed["data"]
-            ofile = preprocessed["ofile"]
-            properties = preprocessed["data_properties"]
+            data = preprocessed['data']
+            if isinstance(data, str):
+                delfile = data
+                data = torch.from_numpy(np.load(data))
+                os.remove(delfile)
 
-            logits_samples = self.predict_logits_from_preprocessed_data_uncertainty(data)
+            ofile = preprocessed['ofile']
+            if ofile is not None:
+                print(f'\nPredicting {os.path.basename(ofile)}:')
+            else:
+                print(f'\nPredicting image of shape {data.shape}:')
 
-            export_uncertainty_from_logits(
-                logits_samples,
-                properties,
-                self.configuration_manager,
-                self.plans_manager,
-                self.dataset_json,
-                ofile
-            )
+            print(f'perform_everything_on_device: {self.perform_everything_on_device}')
 
-    @torch.inference_mode()
+            properties = preprocessed['data_properties']
+
+            # Run stochastic interference
+            logits_samples = self.predict_logits_from_preprocessed_data_with_uncertainty(
+                data
+            )  # shape [S, C, ...]
+
+            # 2. Export (main process!)
+            if ofile is not None:
+                export_uncertainty_from_logits(
+                    logits_samples,
+                    properties,
+                    self.configuration_manager,
+                    self.plans_manager,
+                    self.dataset_json,
+                    ofile,
+                    save_probabilities=save_probabilities
+                )
+            else:
+                # return results instead of writing
+                results.append(logits_samples)
+
+            print('done')
+
+            if isinstance(data_iterator, MultiThreadedAugmenter):
+                data_iterator._finish()
+
+            # cleanup (nnU-Net style)
+            compute_gaussian.cache_clear()
+            empty_cache(self.device)
+
+            return results
+
+
+
+    @torch.no_grad()
     def predict_logits_from_preprocessed_data_with_uncertainty(
-            self, data: torch.Tensor, mc_dropout: bool = True
+            self,
+            data: torch.Tensor,
+            use_mc_dropout: bool = True,
+            mc_passes: int = 10,
+            use_tta: bool = False,
+            tta_passes: int = 4,
     ) -> torch.Tensor:
         """
-        Returns: logits_samples: [S, C, ...], where S is the number of stochastic forward passes
+        Returns:
+            logits_samples: [S, C, ...], where S is the number of stochastic forward passes
+            where S = (#SWAG checkpoints) × mc_passes × tta_passes
         """
         n_threads = torch.get_num_threads()
         torch.set_num_threads(default_num_processes if default_num_processes < n_threads else n_threads)
 
         logits_samples = []
 
-        for params in self.list_of_parameters:  # e.g., your SWAG snapshots
+        for params in self.list_of_parameters:  # e.g., the weights of the SWAG snapshots + checkpoint_final.pth
             # load state dict
             if not isinstance(self.network, OptimizedModule):
                 self.network.load_state_dict(params)
             else:
                 self.network._orig_mod.load_state_dict(params)
 
-            if mc_dropout:
+            if use_mc_dropout:
+
                 self.network.train()  # enable dropout at inference
+                # ensure BN is off
+                for m in self.network.modules():
+                    if isinstance(m, torch.nn.modules.batchnorm._BatchNorm):
+                        m.eval()
             else:
                 self.network.eval()
 
-            # sliding window forward
-            logits = self.predict_sliding_window_return_logits(data).to('cpu')
-            logits_samples.append(logits)
+            mc_iters = mc_passes if use_mc_dropout else 1
+            tta_iters = tta_passes if use_tta else 1
 
-        logits_samples = torch.stack(logits_samples)  # shape [S, C, ...]
+            for _ in range(mc_iters):
+                for _ in range(tta_iters):
+                    # sliding window forward
+                    logits = self.predict_sliding_window_return_logits(data).to('cpu')
+                    logits_samples.append(logits)
+
+
+        logits_samples = torch.stack(logits_samples, dim=0)  # shape [S, C, ...]
 
         torch.set_num_threads(n_threads)
         return logits_samples
