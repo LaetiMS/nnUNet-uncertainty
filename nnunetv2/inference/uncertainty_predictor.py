@@ -1,4 +1,6 @@
+import inspect
 import os
+from copy import deepcopy
 from typing import Tuple, Union, List, Optional
 
 
@@ -6,13 +8,13 @@ import numpy as np
 import torch
 from acvl_utils.cropping_and_padding.padding import pad_nd_image
 from sympy.multipledispatch.dispatcher import RaiseNotImplementedError
-from torch import nn
-from torch._dynamo import OptimizedModule
 from batchgenerators.dataloading.multi_threaded_augmenter import MultiThreadedAugmenter
 from batchgenerators.utilities.file_and_folder_operations import subfiles, load_json, join, isfile, maybe_mkdir_p, isdir, subdirs, \
     save_json
 from batchgeneratorsv2.transforms.intensity.gamma import GammaTransform
 from batchgeneratorsv2.transforms.intensity.gaussian_noise import GaussianNoiseTransform
+from torch import nn
+from torch._dynamo import OptimizedModule
 
 import nnunetv2
 from nnunetv2.configuration import default_num_processes
@@ -22,6 +24,7 @@ from nnunetv2.inference.sliding_window_prediction import compute_gaussian
 from nnunetv2.utilities.helpers import empty_cache, dummy_context
 from nnunetv2.utilities.file_path_utilities import get_output_folder
 from nnunetv2.utilities.find_class_by_name import recursive_find_python_class
+from nnunetv2.utilities.json_export import recursive_fix_for_json_export
 from nnunetv2.utilities.label_handling.label_handling import determine_num_input_channels
 from nnunetv2.utilities.plans_handling.plans_handler import PlansManager, ConfigurationManager
 
