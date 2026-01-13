@@ -19,6 +19,7 @@ def aggregate_logits_for_uncertainty(
         variance: [...], voxel-wise variance over classes (on probabilities)
         entropy: [...], predictive entropy
         mutual_information: [...]
+    NB: S: stochastic samples (MC droput, ensemble members, TTA, etc.), C: number of classes
     """
     if isinstance(logits_samples, np.ndarray):
         logits_samples = torch.from_numpy(logits_samples)
@@ -27,23 +28,27 @@ def aggregate_logits_for_uncertainty(
     mean_logits = logits_samples.mean(dim=0)
 
     # probabilities: softmax per sample
-    probs = torch.softmax(logits_samples, dim=1)
+    probs = torch.softmax(logits_samples, dim=1) # applies softmax accros classes, independently for each sample and voxel
     mean_probs = probs.mean(dim=0)
 
-    # predictive entropy
-    entropy = -(mean_probs * torch.log(mean_probs + 1e-8)).sum(dim=0)
+    # predictive entropy (Shannon netropy in nats = log(C))
+    entropy = -(mean_probs * torch.log(mean_probs + 1e-8)).sum(dim=0) #1e-8 added to avoid potential log(0)
+    # Normalized entropy in [0, 1]
+    nr_classes = mean_probs.shape[0]
+    normalized_entropy = entropy/torch.log(torch.tensor(nr_classes, device=entropy.device))
 
     # variance of probabilities (averaged over classes)
-    probs = torch.softmax(logits_samples, dim=1)
     variance = probs.var(dim=0).mean(dim=0) #to avoid computing variance on logits (who are not scale-invariant / highly sensitive to class imbalance)
     # variance over samples, averaged over classes
     #variance = logits_samples.var(dim=0).mean(dim=0) # version where computed on logits
 
     # add Mutual information here (epistemic uncertainty metric)
     expected_entropy = -(probs * torch.log(probs + 1e-8)).sum(dim=1).mean(dim=0)
-    mutual_information = entropy - expected_entropy
+    mutual_information = entropy - expected_entropy # note that entropy is not normalized
+    # Normalized MI in [0, 1]
+    normalized_mutual_information = mutual_information/torch.log(torch.tensor(nr_classes, device=entropy.device))
 
-    return mean_logits, variance, entropy, mutual_information
+    return mean_logits, variance, entropy, normalized_entropy, mutual_information, normalized_mutual_information
 
 
 def export_uncertainty_from_logits(
@@ -69,7 +74,7 @@ def export_uncertainty_from_logits(
         dataset_json_dict_or_file = load_json(dataset_json_dict_or_file)
 
     # aggregate
-    mean_logits, variance, entropy, mutual_information = aggregate_logits_for_uncertainty(logits_samples)
+    mean_logits, variance, entropy, normalized_entropy, mutual_information, normalized_mutual_information = aggregate_logits_for_uncertainty(logits_samples)
 
     # --- export segmentation (reuse existing code!) ---
     label_manager = plans_manager.get_label_manager(dataset_json_dict_or_file)
@@ -111,8 +116,8 @@ def export_uncertainty_from_logits(
         [spacing_transposed[0], *configuration_manager.spacing]
 
     for name, vol in zip(
-        ["variance", "entropy", "mutual_information"],
-        [variance, entropy, mutual_information]
+        ["variance", "entropy", "normalized_entropy", "mutual_information", "normalized_mutual_information"],
+        [variance, entropy, normalized_entropy, mutual_information, normalized_mutual_information]
     ):
         vol = configuration_manager.resampling_fn_probabilities(
             vol[None],  # fake channel dim
