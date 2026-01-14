@@ -35,7 +35,6 @@ def compute_probabilistic_metrics(
     labels_or_regions,
     ignore_label=None,
     n_bins=15,
-    foreground_only: bool = True,
     eps: float = 1e-8,
 ) -> dict:
     """
@@ -54,7 +53,6 @@ def compute_probabilistic_metrics(
     :param labels_or_regions: (same object as passed to compute_metrics -->[1] #binary foreground, [(1,2)] #merged regions, [1,2,3] #multiclass)
     :param ignore_label: Label in GT to ignore (e.g. padding, undefined), should match ignore_label used during training
     :param n_bins: Number of confidense bins for ECE (typically 10-20), more bins = noisier, fewer bins -> smoother but less precise
-    :param foreground_only: Whether to computer metrics only on foreground voxels (common in medical segmentation calibration)
     :param eps: Numerical stability constant -> prevents log(0) in NLL and division-by-zero in ECE bins
     :return:
     Output structure example:
@@ -83,37 +81,17 @@ def compute_probabilistic_metrics(
 
     """
 
-    # mean_probs, prob_dict = image_reader_writer.read_prob(probability_file)
-    #
-    # # NLL binary case, per region
-    # p = mean_probs[fg_class]  # foreground probability
-    # y = (seg_ref == r).astype(np.float32)
-    #
-    # nll = -(y * np.log(p + eps) + (1 - y) * np.log(1 - p + eps))
-    # nll = nll[~ignore_mask].mean()
-    #
-    # # Brier score
-    # brier = ((p - y) ** 2)
-    # brier = brier[~ignore_mask].mean()
-    #
-    # # ECE (voxel-wise)
-    # conf = np.maximum(p, 1 - p)
-    # pred = (p >= 0.5)
-    # correct = (pred == y)
-    #
-    # ece = compute_ece(conf, correct, n_bins)
-
     #############################
     # TODO: ADAPT FOR MULTICLASS CURRENTLY ONLY BINARY!!!
 
     # --- Load GT and probabilities ---
     seg_ref, _ = image_reader_writer.read_seg(reference_file)
+    seg_ref = seg_ref[0]  # now shape [X,Y,Z]
     probs, _ = image_reader_writer.read_seg(prob_file)
 
     # probs can be [C, X, Y, Z] or [X, Y, Z] (binary FG prob), if binary stored as [X,Y,Z], convert to [2,X,Y,Z]
-    if probs.ndim == seg_ref.ndim:
-        # binary case: probs = foreground probability
-        probs = np.stack([1.0 - probs, probs], axis=0)
+    if probs.ndim == seg_ref.ndim: #binary case [X,Y,Z]
+        probs = np.stack([1.0 - probs, probs], axis=0) # [2,X,Y,Z]
 
     nr_classes = probs.shape[0]
 
@@ -129,7 +107,7 @@ def compute_probabilistic_metrics(
     for r in labels_or_regions:
         results["metrics"][r] = {}
 
-        # GT mask for this region
+        # GT mask for this region (bool)
         gt_mask = region_or_label_to_mask(seg_ref, r)
 
         if ignore_mask is not None:
@@ -139,7 +117,7 @@ def compute_probabilistic_metrics(
             valid_mask = np.ones_like(gt_mask, dtype=bool)
 
         # only foreground computation by default
-        eval_mask = gt_mask & valid_mask
+        eval_mask = gt_mask & valid_mask #bool
 
         if not np.any(eval_mask):
             results["metrics"][r]["NLL"] = np.nan
@@ -149,27 +127,48 @@ def compute_probabilistic_metrics(
             continue
 
         # --- Extract probabilities ---
-        # Binary foreground probability
-        p_fg = probs[1] if nr_classes == 2 else probs[r]
+        # Ground truth for selected voxels
+        gt_voxels = seg_ref[eval_mask].astype(int) # shape [nr_valid_voxels] or  seg_ref[0][eval_mask] to remove singleton [1,X,Y,Z]
+        # probs has shape [C, D, H, W], keep all classes
+        probs_eval = probs[:, eval_mask]  # shape [nr_classes, nr_valid_voxels]
+        # # transpose to match metric function format
+        probs_eval = probs_eval.T  # shape [nr_valid_voxels, nr_classes]
 
-        y = gt_mask.astype(np.float32)
-
-        p = p_fg[eval_mask]
-        y = y[eval_mask]
+        # p_fg = probs[1] if nr_classes == 2 else probs[r]
+        #
+        # y = gt_mask.astype(np.float32)
+        #
+        # p = p_fg[eval_mask]
+        # y = y[eval_mask]
 
         # --- Negative Log-Likelihood ---
-        nll = -(y * np.log(p + eps) + (1.0 - y) * np.log(1.0 - p + eps))
-        #p_true = probs_eval[gt, np.arange(gt.size)]
-        #nll = -np.log(p_true + eps)
-        nll = float(nll.mean())
+        # # 2 class
+        # nll = -(y * np.log(p + eps) + (1.0 - y) * np.log(1.0 - p + eps))
+        # nll = float(nll.mean())
+
+        # multiclass
+        p_true = probs_eval[np.arange(gt_voxels.size), gt_voxels] #if probs_eval was transposed
+        # p_true = probs_eval[gt_voxels, np.arange(gt_voxels.size)] # if probs_eval was not transposed
+        nll = float(-np.mean(np.log(p_true + eps)))
 
         # --- Brier score ---
-        brier = float(np.mean((p - y) ** 2))
+        # # 2 class
+        # brier = float(np.mean((p_true - y) ** 2))
+
+        # multiclass
+        y_onehot = np.eye(nr_classes)[gt_voxels] # shape [nr_valid_voxels, nr_classes]
+        brier = float(np.mean(np.sum((probs_eval - y_onehot) **2, axis=1)))
 
         # --- Expected Calibration Error ---
-        confidence = np.maximum(p, 1.0 - p)
-        prediction = p >= 0.5
-        correct = prediction == y.astype(bool)
+        # 2 class
+        # confidence = np.maximum(p, 1.0 - p)
+        # prediction = p >= 0.5
+        # correct = prediction == y.astype(bool)
+
+        #multiclass
+        pred = np.argmax(probs_eval, axis=1)
+        confidence = np.max(probs_eval, axis=1)
+        correct = pred == gt_voxels
 
         ece = compute_ece(confidence, correct, n_bins=n_bins)
 
