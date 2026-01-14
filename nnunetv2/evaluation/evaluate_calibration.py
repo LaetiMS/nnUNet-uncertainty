@@ -5,11 +5,12 @@
 import numpy as np
 from typing import Union, List, Tuple, Optional
 from nnunetv2.imageio.base_reader_writer import BaseReaderWriter
+from nnunetv2.evaluation.evaluate_predictions import region_or_label_to_mask
 
 def compute_ece(confidence, correct, n_bins=15):
     """
-    confidence: [N] predicted confidence in [0, 1]
-    correct:    [N] boolean correctness
+    confidence: [N] predicted confidence in [0, 1] -> max softmax probability per voxel
+    correct:    [N] boolean correctness (prediction == GT)
     """
     bins = np.linspace(0.0, 1.0, n_bins + 1)
     ece = 0.0
@@ -46,6 +47,7 @@ def compute_probabilistic_metrics(
             - Brier Score
             - ECE
             Metrics are computed voxel-wise and aggregated per case.
+            Works for binary and multiclass segmentation
     :param reference_file: Path to ground-truth segmentation file
     :param prob_file: Path to saved softmax probability map file --> todo check shape [C,X,Y,Z] or is it [X,Y,Z] for binary case (foreground probability)
     :param image_reader_writer: Used for consistent loading across nnUNetv2
@@ -108,7 +110,7 @@ def compute_probabilistic_metrics(
     seg_ref, _ = image_reader_writer.read_seg(reference_file)
     probs, _ = image_reader_writer.read_seg(prob_file)
 
-    # probs can be [C, X, Y, Z] or [X, Y, Z] (binary FG prob)
+    # probs can be [C, X, Y, Z] or [X, Y, Z] (binary FG prob), if binary stored as [X,Y,Z], convert to [2,X,Y,Z]
     if probs.ndim == seg_ref.ndim:
         # binary case: probs = foreground probability
         probs = np.stack([1.0 - probs, probs], axis=0)
@@ -128,21 +130,16 @@ def compute_probabilistic_metrics(
         results["metrics"][r] = {}
 
         # GT mask for this region
-        if isinstance(r, tuple):
-            gt_mask = np.isin(seg_ref, r)
-        else:
-            gt_mask = seg_ref == r
+        gt_mask = region_or_label_to_mask(seg_ref, r)
 
         if ignore_mask is not None:
-            valid_mask = ~ignore_mask
-            gt_mask = gt_mask & valid_mask
+            # add explicit calculation of valid_voxels -> done in compute_tp_fp_fn_tn implicitly (use_mask)
+            valid_mask = ~ignore_mask if ignore_mask is not None else np.ones_like(seg_ref, bool)
         else:
             valid_mask = np.ones_like(gt_mask, dtype=bool)
 
-        if foreground_only:
-            eval_mask = gt_mask
-        else:
-            eval_mask = valid_mask
+        # only foreground computation by default
+        eval_mask = gt_mask & valid_mask
 
         if not np.any(eval_mask):
             results["metrics"][r]["NLL"] = np.nan
