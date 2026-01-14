@@ -86,7 +86,7 @@ def compute_probabilistic_metrics(
 
     # --- Load GT and probabilities ---
     seg_ref, _ = image_reader_writer.read_seg(reference_file)
-    seg_ref = seg_ref[0]  # now shape [X,Y,Z]
+    seg_ref = seg_ref[0]  # remove singleton --> now shape [X,Y,Z] #todo check
     probs, _ = image_reader_writer.read_seg(prob_file)
 
     # probs can be [C, X, Y, Z] or [X, Y, Z] (binary FG prob), if binary stored as [X,Y,Z], convert to [2,X,Y,Z]
@@ -132,40 +132,18 @@ def compute_probabilistic_metrics(
         # probs has shape [C, D, H, W], keep all classes
         probs_eval = probs[:, eval_mask]  # shape [nr_classes, nr_valid_voxels]
         # # transpose to match metric function format
-        probs_eval = probs_eval.T  # shape [nr_valid_voxels, nr_classes]
+        probs_eval = probs_eval.T  # shape [nr_valid_voxels, nr_classes] #todo check -> check also that there is no issue with shape
 
-        # p_fg = probs[1] if nr_classes == 2 else probs[r]
-        #
-        # y = gt_mask.astype(np.float32)
-        #
-        # p = p_fg[eval_mask]
-        # y = y[eval_mask]
-
-        # --- Negative Log-Likelihood ---
-        # # 2 class
-        # nll = -(y * np.log(p + eps) + (1.0 - y) * np.log(1.0 - p + eps))
-        # nll = float(nll.mean())
-
-        # multiclass
+        # --- Negative Log-Likelihood (multiclass) ---
         p_true = probs_eval[np.arange(gt_voxels.size), gt_voxels] #if probs_eval was transposed
         # p_true = probs_eval[gt_voxels, np.arange(gt_voxels.size)] # if probs_eval was not transposed
         nll = float(-np.mean(np.log(p_true + eps)))
 
-        # --- Brier score ---
-        # # 2 class
-        # brier = float(np.mean((p_true - y) ** 2))
-
-        # multiclass
+        # --- Brier score (multiclass) ---
         y_onehot = np.eye(nr_classes)[gt_voxels] # shape [nr_valid_voxels, nr_classes]
         brier = float(np.mean(np.sum((probs_eval - y_onehot) **2, axis=1)))
 
-        # --- Expected Calibration Error ---
-        # 2 class
-        # confidence = np.maximum(p, 1.0 - p)
-        # prediction = p >= 0.5
-        # correct = prediction == y.astype(bool)
-
-        #multiclass
+        # --- Expected Calibration Error (multiclass)---
         pred = np.argmax(probs_eval, axis=1)
         confidence = np.max(probs_eval, axis=1)
         correct = pred == gt_voxels
