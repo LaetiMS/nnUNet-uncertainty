@@ -234,10 +234,50 @@ class UncertaintyPredictor(nnUNetPredictor):
                  verbose: bool = False,
                  verbose_preprocessing: bool = False,
                  allow_tqdm: bool = True,
+                 enable_mc_dropout: bool = False,
                  enable_swag_prediction: bool = False,
+                 enable_tta_nnunet_limits: bool = False,
+                 enable_tta_agressive: bool = False,
+                 enable_tta_paper: bool = False,
                  ):
         super().__init__(tile_step_size,use_gaussian,use_mirroring,perform_everything_on_device, device, verbose, verbose_preprocessing, allow_tqdm)
+
+        # which uncertainty method should be added
+        self.enable_mc_dropout = enable_mc_dropout
         self.enable_swag_predict = enable_swag_prediction
+        self.enable_tta_nnunet_limits = enable_tta_nnunet_limits
+        self.enable_tta_agressive = enable_tta_agressive
+        self.enable_tta_paper = enable_tta_paper
+
+        self.enable_TTA_extended = True if self.enable_tta_nnunet_limits or self.enable_tta_agressive or self.enable_tta_paper else False
+        # todo: add layered_ensembles (both in __init__ and _get_uncertainty_method_name) + implement method
+        self.uncertainty_method_name = self._get_uncertainty_method_name
+
+    def _get_uncertainty_method_name(self) -> str:
+        """
+        Aggregates the different uncertainty methods that are used in the predictor
+        """
+        name = ''
+        if self.enable_mc_dropout:
+            name += f"{('_' if not name.startswith('_') else '')}mc_dropout"
+        if self.enable_swag_predict:
+            name += f"{('_' if not name.startswith('_') else '')}swag"
+        if self.use_mirroring or self.enable_TTA_extended:
+            name += f"{('_' if not name.startswith('_') else '')}tta"
+            if self.use_mirroring:
+                name += '_mirroring'
+            if self.enable_tta_nnunet_limits:
+                name += '_limits'
+            if self.enable_tta_agressive:
+                name += '_agressive'
+            if self.enable_tta_paper:
+                name += '_paper'
+        if name == '':
+            name = 'no_uncertainty'
+        return name
+
+        # todo: add layered_ensembles
+
 
     def initialize_from_trained_model_folder(self, model_training_output_dir: str,
                                              use_folds: Union[Tuple[Union[int, str]], None],
@@ -354,6 +394,25 @@ class UncertaintyPredictor(nnUNetPredictor):
           - runs SWAG / MC Dropout / TTA inference
           - aggregates uncertainty on the main process
           - exports segmentation + uncertainty maps
+
+
+        NB: Example of resulting structure (i.e. if self.uncertainty_method_name is mc_dropout, swag, deep_ensemble etc.).
+        PS: Make sure to run evaluation pipeline once per method pointing to probabilities/<method_name>/:
+        predictions/
+        └── uncertainty/
+            ├── mc_dropout/
+            │   ├── case_001.nii.gz
+            │   ├── case_001_entropy.nii.gz
+            │   ├── case_001_variance.nii.gz
+            │   ├── case_001_mutual_information.nii.gz
+            │   └── case_001_normalized_entropy.nii.gz
+            │
+            ├── deep_ensemble/
+            │   └── ...
+            │
+            └── swag/
+                └── ...
+
         """
 
         results = [] # r
@@ -365,10 +424,16 @@ class UncertaintyPredictor(nnUNetPredictor):
                 data = torch.from_numpy(np.load(data))
                 os.remove(delfile)
 
-            ofile = preprocessed['ofile']
-            if ofile is not None:
-                print(f'\nPredicting {os.path.basename(ofile)}:')
+            ofile_base = preprocessed['ofile']
+            # structure based on uncertainty method
+            if ofile_base is not None:
+                case_id = os.path.basename(ofile_base)
+                base_dir = os.path.dirname(ofile_base)
+                ofile = os.path.join(base_dir, "uncertainty", str(self.uncertainty_method_name), case_id)
+                os.makedirs(os.path.dirname(ofile), exist_ok=True)
+                print(f'\nPredicting {os.path.basename(ofile_base)}:')
             else:
+                ofile = None
                 print(f'\nPredicting image of shape {data.shape}:')
 
             print(f'perform_everything_on_device: {self.perform_everything_on_device}')
@@ -391,20 +456,20 @@ class UncertaintyPredictor(nnUNetPredictor):
                     ofile,
                     save_probabilities=save_probabilities
                 )
+                print(f'done with {os.path.basename(ofile)}')
             else:
                 # return results instead of writing
                 results.append(logits_samples)
-
             print('done')
 
-            if isinstance(data_iterator, MultiThreadedAugmenter):
-                data_iterator._finish()
+        if isinstance(data_iterator, MultiThreadedAugmenter):
+            data_iterator._finish()
 
-            # cleanup (nnU-Net style)
-            compute_gaussian.cache_clear()
-            empty_cache(self.device)
+        # cleanup (nnU-Net style)
+        compute_gaussian.cache_clear()
+        empty_cache(self.device)
 
-            return results
+        return results
 
 
 
@@ -880,16 +945,20 @@ def predict_entry_point_uncertainty():
                         help='Set this flag to disable progress bar. Recommended for HPC environments (non interactive '
                              'jobs)')
     # new
+    parser.add_argument('--activate_mc_dropout_prediction', action='store_true', required=False, default=False,
+                        help='Set this flag to activate dropout during the prediction.')
     parser.add_argument('--activate_swag_predict', action='store_true', required=False, default=False,
                         help='Set this flag to predict for each checkpoint saved in swag_snapshots. ')
-    parser.add_argument('--activate_dropout_prediction', action='store_true', required=False, default=False,
-                        help='Set this flag to activate dropout during the prediction.')
-    parser.add_argument('--activate_extended_TTA', action='store_true', required=False, default=False,
-                        help='Set this flag to activate extended TTA during the prediction.')
+    parser.add_argument('--activate_TTA_nnunet_limits', action='store_true', required=False, default=False,
+                        help='Set this flag to activate an extended TTA - training augmentations but more extreme - during the prediction.')
+    parser.add_argument('--activate_TTA_agressive', action='store_true', required=False, default=False,
+                        help='Set this flag to activate an extended TTA - agressive augmentations from the torchio library that were not used in training - during the prediction.')
+    parser.add_argument('--activate_TTA_paper', action='store_true', required=False, default=False,
+                        help='Set this flag to activate an extended TTA - augmentations used in paper: https://arxiv.org/abs/1807.07356 - during the prediction.')
     parser.add_argument('--activate_layered_ensembles', action='store_true', required=False, default=False,
                         help='Set this flag to extract the layers to derive uncertainties for an'
                              'approximate layered ensembles uncertainty estimation.')
-
+    # todo: add --activate_deep_ensembles here? (can be similar to the use of swag_predict only that instead we store all checkpoints in the same DE location? --> decide still
 
     print(
         "\n#######################################################################\nPlease cite the following paper "
@@ -932,10 +1001,12 @@ def predict_entry_point_uncertainty():
                                 verbose=args.verbose,
                                 verbose_preprocessing=args.verbose,
                                 allow_tqdm=not args.disable_progress_bar,
-                                enable_mc_dropout=args.activate_dropout_prediction, # added
-                                enable_extended_TTA=args.activate_extended_TTA,
-                                enable_layered_ensembles=args.activate_layered_ensembles,
-                                # enable_swag=args.activate_swag_predict
+                                enable_mc_dropout=args.activate_mc_dropout_prediction, # added
+                                enable_swag_prediction = args.activate_swag_predict,
+                                enable_tta_nnunet_limits = args.activate_tta_nnunet_limits,
+                                enable_tta_agressive = args.activate_tta_agressive,
+                                enable_tta_paper = args.activate_tta_paper,
+                                #enable_layered_ensembles=args.activate_layered_ensembles,
                                 )
     #todo: here
     predictor.initialize_from_trained_model_folder(
@@ -1079,3 +1150,7 @@ if __name__ == '__main__':
     #os.environ['TORCHINDUCTOR_COMPILE_THREADS'] = 1
     # multiprocessing.set_start_method("spawn")
     predict_entry_point_uncertainty()
+
+
+    # todo: add self.uncertainty_method_name to predictor
+    # todo: add a if enable_method -> self.uncertainty_method name
