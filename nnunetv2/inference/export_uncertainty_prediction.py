@@ -128,7 +128,7 @@ def export_uncertainty_from_logits(
 
         vol = insert_crop_into_image(
             np.zeros(properties_dict['shape_before_cropping'], dtype=np.float32),
-            vol.cpu().numpy(),
+            vol, #.cpu().numpy(),
             properties_dict['bbox_used_for_cropping']
         )
 
