@@ -251,7 +251,7 @@ class UncertaintyPredictor(nnUNetPredictor):
 
         self.enable_TTA_extended = True if self.enable_tta_nnunet_limits or self.enable_tta_agressive or self.enable_tta_paper else False
         # todo: add layered_ensembles (both in __init__ and _get_uncertainty_method_name) + implement method
-        self.uncertainty_method_name = self._get_uncertainty_method_name
+        self.uncertainty_method_name = self._get_uncertainty_method_name()
 
     def _get_uncertainty_method_name(self) -> str:
         """
@@ -259,11 +259,11 @@ class UncertaintyPredictor(nnUNetPredictor):
         """
         name = ''
         if self.enable_mc_dropout:
-            name += f"{('_' if not name.startswith('_') else '')}mc_dropout"
+            name += f"{('_' if not name =='' else '')}mc_dropout"
         if self.enable_swag_predict:
-            name += f"{('_' if not name.startswith('_') else '')}swag"
+            name += f"{('_' if not name =='' else '')}swag"
         if self.use_mirroring or self.enable_TTA_extended:
-            name += f"{('_' if not name.startswith('_') else '')}tta"
+            name += f"{('_' if not name =='' else '')}tta"
             if self.use_mirroring:
                 name += '_mirroring'
             if self.enable_tta_nnunet_limits:
@@ -288,7 +288,7 @@ class UncertaintyPredictor(nnUNetPredictor):
             Note it exploits how the weights of the different folds would be added!
         """
         if self.enable_swag_predict:
-            if checkpoint_name is 'checkpoint_final.pth':
+            if checkpoint_name == 'checkpoint_final.pth':
                 if use_folds is None:
                     use_folds = nnUNetPredictor.auto_detect_available_folds(model_training_output_dir, checkpoint_name)
 
@@ -949,11 +949,11 @@ def predict_entry_point_uncertainty():
                         help='Set this flag to activate dropout during the prediction.')
     parser.add_argument('--activate_swag_predict', action='store_true', required=False, default=False,
                         help='Set this flag to predict for each checkpoint saved in swag_snapshots. ')
-    parser.add_argument('--activate_TTA_nnunet_limits', action='store_true', required=False, default=False,
+    parser.add_argument('--activate_tta_nnunet_limits', action='store_true', required=False, default=False,
                         help='Set this flag to activate an extended TTA - training augmentations but more extreme - during the prediction.')
-    parser.add_argument('--activate_TTA_agressive', action='store_true', required=False, default=False,
+    parser.add_argument('--activate_tta_agressive', action='store_true', required=False, default=False,
                         help='Set this flag to activate an extended TTA - agressive augmentations from the torchio library that were not used in training - during the prediction.')
-    parser.add_argument('--activate_TTA_paper', action='store_true', required=False, default=False,
+    parser.add_argument('--activate_tta_paper', action='store_true', required=False, default=False,
                         help='Set this flag to activate an extended TTA - augmentations used in paper: https://arxiv.org/abs/1807.07356 - during the prediction.')
     parser.add_argument('--activate_layered_ensembles', action='store_true', required=False, default=False,
                         help='Set this flag to extract the layers to derive uncertainties for an'
@@ -1008,6 +1008,22 @@ def predict_entry_point_uncertainty():
                                 enable_tta_paper = args.activate_tta_paper,
                                 #enable_layered_ensembles=args.activate_layered_ensembles,
                                 )
+
+    # def __init__(self,
+    #              tile_step_size: float = 0.5,
+    #              use_gaussian: bool = True,
+    #              use_mirroring: bool = True,
+    #              perform_everything_on_device: bool = True,
+    #              device: torch.device = torch.device('cuda'),
+    #              verbose: bool = False,
+    #              verbose_preprocessing: bool = False,
+    #              allow_tqdm: bool = True,
+    #              enable_mc_dropout: bool = False,
+    #              enable_swag_prediction: bool = False,
+    #              enable_tta_nnunet_limits: bool = False,
+    #              enable_tta_agressive: bool = False,
+    #              enable_tta_paper: bool = False,
+    #              ):
     #todo: here
     predictor.initialize_from_trained_model_folder(
         model_folder,
@@ -1026,50 +1042,20 @@ def predict_entry_point_uncertainty():
 
     else:
 
-        predictor.predict_from_files(args.i, args.o, save_probabilities=args.save_probabilities,
-                                     overwrite=not args.continue_prediction,
-                                     num_processes_preprocessing=args.npp,
-                                     num_processes_segmentation_export=args.nps,
-                                     folder_with_segs_from_prev_stage=args.prev_stage_predictions,
-                                     num_parts=args.num_parts,
-                                     part_id=args.part_id)
-
-    if args.activate_swag_predict:
-        swag_ckpts = sorted(
-            glob(join(model_folder, f"fold_{args.f}", "swag_snapshots", "epoch_*.pth"))
-        )
-
-        # convert absolute paths → relative paths expected by nnUNet
-        swag_ckpts = [
-            ckpt.split(f"fold_{args.f}/")[-1]
-            for ckpt in swag_ckpts
-        ]
-
-        checkpoint_names = [args.chk] + swag_ckpts
-
-        for checkpoint_name in checkpoint_names:
-            predictor.initialize_from_trained_model_folder(
-                model_folder,
-                args.f,
-                checkpoint_name=checkpoint_name
-            )
-            if run_sequential:
-
-                print("Running in non-multiprocessing mode")
-                output_path = os.path.join(args.o, f"fold_{args.f}", "swag_snapshots")
-                predictor.predict_from_files_sequential(args.i, args.o, save_probabilities=args.save_probabilities,
-                                                        overwrite=not args.continue_prediction,
-                                                        folder_with_segs_from_prev_stage=args.prev_stage_predictions)
-
-            else:
-
-                predictor.predict_from_files(args.i, args.o, save_probabilities=args.save_probabilities,
-                                             overwrite=not args.continue_prediction,
-                                             num_processes_preprocessing=args.npp,
-                                             num_processes_segmentation_export=args.nps,
-                                             folder_with_segs_from_prev_stage=args.prev_stage_predictions,
-                                             num_parts=args.num_parts,
-                                             part_id=args.part_id)
+        # predictor.predict_from_files(args.i, args.o, save_probabilities=args.save_probabilities,
+        #                              overwrite=not args.continue_prediction,
+        #                              num_processes_preprocessing=args.npp,
+        #                              num_processes_segmentation_export=args.nps,
+        #                              folder_with_segs_from_prev_stage=args.prev_stage_predictions,
+        #                              num_parts=args.num_parts,
+        #                              part_id=args.part_id)
+        predictor.predict_from_files_uncertainty(args.i, args.o, save_probabilities=args.save_probabilities,
+                                                 overwrite=not args.continue_prediction,
+                                                 num_processes_preprocessing=args.npp,
+                                                 num_processes_segmentation_export=args.nps,
+                                                 folder_with_segs_from_prev_stage=args.prev_stage_predictions,
+                                                 num_parts=args.num_parts,
+                                                 part_id=args.part_id)
 
 
 
