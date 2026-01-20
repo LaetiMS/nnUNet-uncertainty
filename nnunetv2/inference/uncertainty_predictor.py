@@ -549,10 +549,10 @@ class UncertaintyPredictor(nnUNetPredictor):
 
             properties = preprocessed['data_properties']
 
-            # Run stochastic interference
+            # Run stochastic interference and convert to numpy to prevent uncatchable memory alignment errors from multiprocessing serialization of torch tensors
             logits_samples = self.predict_logits_from_preprocessed_data_with_uncertainty(
                 data
-            )  # shape [S, C, ...]
+            ).cpu().detach().numpy()  # shape [S, C, ...]
 
             # 2. Export (main process!)
             if ofile is not None:

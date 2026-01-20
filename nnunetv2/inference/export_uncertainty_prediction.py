@@ -6,13 +6,19 @@ from acvl_utils.cropping_and_padding.bounding_boxes import insert_crop_into_imag
 from batchgenerators.utilities.file_and_folder_operations import load_json, save_pickle
 
 from nnunetv2.configuration import default_num_processes
+from nnunetv2.utilities.label_handling.label_handling import LabelManager
 from nnunetv2.utilities.plans_handling.plans_handler import PlansManager, ConfigurationManager
 from nnunetv2.inference.export_prediction import convert_predicted_logits_to_segmentation_with_correct_shape
 
 def aggregate_logits_for_uncertainty(
     logits_samples: Union[torch.Tensor, np.ndarray],
-    eps: float = 1e-8
-):
+    plans_manager: PlansManager,
+    configuration_manager: ConfigurationManager,
+    label_manager: LabelManager,
+    properties_dict: dict,
+    num_threads_torch: int = default_num_processes,
+    eps: float = 1e-8,
+    ):
     """
     logits_samples: [S, C, ...]
     Returns:
@@ -25,12 +31,28 @@ def aggregate_logits_for_uncertainty(
     if isinstance(logits_samples, np.ndarray):
         logits_samples = torch.from_numpy(logits_samples)
 
-    # mean over samples (for segmentation)
-    mean_logits = logits_samples.mean(dim=0)
+    segmentations = []
+    probabilities = []
+    for logits_sample in logits_samples[:]:
+        segmentation_reverted_cropping, predicted_probabilities = convert_predicted_logits_to_segmentation_with_correct_shape(
+            logits_sample,plans_manager, configuration_manager,
+            label_manager, properties_dict, True,
+            num_threads_torch=default_num_processes)
+        segmentations.append(segmentation_reverted_cropping)
+        probabilities.append(predicted_probabilities)
 
-    # probabilities: softmax per sample
-    probs = torch.softmax(logits_samples, dim=1) # applies softmax accros classes, independently for each sample and voxel
-    mean_probs = probs.mean(dim=0)
+    probabilities = np.stack(probabilities, axis=0)  # [S, C, H, W, D] as a numpy array
+    probabilities = torch.from_numpy(probabilities) # [S, C, H, W, D] as a numpy array
+    mean_logits = logits_samples.mean(dim=0)         # [C, H, W, D] as tensor
+    #mean_probs = torch.from_numpy(probabilities.mean(axis=0))  # [C, H, W, D] as tensor
+    mean_probs = torch.mean(probabilities,dim=0)
+
+    ## mean over samples (for segmentation)
+    #mean_logits = logits_samples.mean(dim=0)
+
+    ## probabilities: softmax per sample
+    #probabilities = torch.softmax(logits_samples, dim=1) # applies softmax across classes, independently for each sample and voxel
+    #mean_probs = probabilities.mean(dim=0)
 
     # predictive entropy (Shannon netropy in nats = log(C))
     entropy = -(mean_probs * torch.log(mean_probs + eps)).sum(dim=0) #eps added to avoid potential log(0)
@@ -39,12 +61,12 @@ def aggregate_logits_for_uncertainty(
     normalized_entropy = entropy/torch.log(torch.tensor(nr_classes, device=entropy.device))
 
     # variance of probabilities (averaged over classes)
-    variance = probs.var(dim=0).mean(dim=0) #to avoid computing variance on logits (who are not scale-invariant / highly sensitive to class imbalance)
+    variance = probabilities.var(dim=0).mean(dim=0) #to avoid computing variance on logits (who are not scale-invariant / highly sensitive to class imbalance)
     # variance over samples, averaged over classes
     #variance = logits_samples.var(dim=0).mean(dim=0) # version where computed on logits
 
     # add Mutual information here (epistemic uncertainty metric)
-    expected_entropy = -(probs * torch.log(probs + eps)).sum(dim=1).mean(dim=0)
+    expected_entropy = -(probabilities * torch.log(probabilities + eps)).sum(dim=1).mean(dim=0)
     mutual_information = entropy - expected_entropy # note that entropy is not normalized
     # Normalized MI in [0, 1]
     normalized_mutual_information = mutual_information/torch.log(torch.tensor(nr_classes, device=entropy.device))
@@ -75,11 +97,10 @@ def export_uncertainty_from_logits(
         dataset_json_dict_or_file = load_json(dataset_json_dict_or_file)
 
     # aggregate
-    mean_logits, variance, entropy, normalized_entropy, mutual_information, normalized_mutual_information = aggregate_logits_for_uncertainty(logits_samples)
+    label_manager = plans_manager.get_label_manager(dataset_json_dict_or_file)
+    mean_logits, variance, entropy, normalized_entropy, mutual_information, normalized_mutual_information = aggregate_logits_for_uncertainty(logits_samples, plans_manager, configuration_manager, label_manager, properties_dict,num_threads_torch=num_threads_torch)
 
     # --- export segmentation (reuse existing code!) ---
-    label_manager = plans_manager.get_label_manager(dataset_json_dict_or_file)
-
     ret = convert_predicted_logits_to_segmentation_with_correct_shape(
         mean_logits,
         plans_manager,
