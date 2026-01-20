@@ -1,7 +1,11 @@
 import inspect
+import multiprocessing
 import os
 from copy import deepcopy
+from queue import Queue
+from threading import Thread
 from typing import Tuple, Union, List, Optional
+from time import sleep
 
 
 import numpy as np
@@ -15,14 +19,17 @@ from batchgeneratorsv2.transforms.intensity.gamma import GammaTransform
 from batchgeneratorsv2.transforms.intensity.gaussian_noise import GaussianNoiseTransform
 from torch import nn
 from torch._dynamo import OptimizedModule
+from tqdm import tqdm
 
 import nnunetv2
 from nnunetv2.configuration import default_num_processes
+from nnunetv2.inference.export_prediction import export_prediction_from_logits, \
+    convert_predicted_logits_to_segmentation_with_correct_shape
 from nnunetv2.inference.export_uncertainty_prediction import export_uncertainty_from_logits
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor, _getDefaultValue
 from nnunetv2.inference.sliding_window_prediction import compute_gaussian
 from nnunetv2.utilities.helpers import empty_cache, dummy_context
-from nnunetv2.utilities.file_path_utilities import get_output_folder
+from nnunetv2.utilities.file_path_utilities import get_output_folder, check_workers_alive_and_busy
 from nnunetv2.utilities.find_class_by_name import recursive_find_python_class
 from nnunetv2.utilities.json_export import recursive_fix_for_json_export
 from nnunetv2.utilities.label_handling.label_handling import determine_num_input_channels
@@ -30,6 +37,25 @@ from nnunetv2.utilities.plans_handling.plans_handler import PlansManager, Config
 
 
 from glob import glob
+
+def set_network_mode_for_inference(network: torch.nn.Module, enable_mc_dropout: bool):
+    """
+    Sets the network in inference mode with optional MC dropout.
+
+    Args:
+        network: torch.nn.Module, the network to set
+        enable_mc_dropout: if True, dropout layers stay active during inference
+    """
+    if enable_mc_dropout:
+        network.train()  # enable dropout at inference
+        # Force BatchNorm layers to eval (do not update running stats)
+        for m in network.modules():
+            if isinstance(m, torch.nn.modules.batchnorm._BatchNorm):
+                m.eval()
+    else:
+        network.eval()
+
+
 
 class MCDropoutPredictor(nnUNetPredictor):
     def __init__(self,
@@ -250,6 +276,7 @@ class UncertaintyPredictor(nnUNetPredictor):
         self.enable_tta_paper = enable_tta_paper
 
         self.enable_TTA_extended = True if self.enable_tta_nnunet_limits or self.enable_tta_agressive or self.enable_tta_paper else False
+        self.uncertainty_method_is_in_use = True if self.enable_TTA_extended or self.enable_mc_dropout or self.enable_swag_predict else False
         # todo: add layered_ensembles (both in __init__ and _get_uncertainty_method_name) + implement method
         self.uncertainty_method_name = self._get_uncertainty_method_name()
 
@@ -373,6 +400,88 @@ class UncertaintyPredictor(nnUNetPredictor):
         else:
             super().initialize_from_trained_model_folder(model_training_output_dir, use_folds, checkpoint_name)
 
+    def predict_from_data_iterator_new_ofile(self,
+                                   data_iterator,
+                                   save_probabilities: bool = False,
+                                   num_processes_segmentation_export: int = default_num_processes):
+        """
+        copy of predict_from_data_iterator, but the output file path is modified to account for the uncertainty estimation_method (i.e. no_uncertainty or mirror_only).
+        each element returned by data_iterator must be a dict with 'data', 'ofile' and 'data_properties' keys!
+        If 'ofile' is None, the result will be returned instead of written to a file
+        """
+        with multiprocessing.get_context("spawn").Pool(num_processes_segmentation_export) as export_pool:
+            worker_list = [i for i in export_pool._pool]
+            r = []
+            for preprocessed in data_iterator:
+                data = preprocessed['data']
+                if isinstance(data, str):
+                    delfile = data
+                    data = torch.from_numpy(np.load(data))
+                    os.remove(delfile)
+
+                # added start
+                ofile_base = preprocessed['ofile']
+                # structure based on uncertainty method
+                if ofile_base is not None:
+                    case_id = os.path.basename(ofile_base)
+                    base_dir = os.path.dirname(ofile_base)
+                    ofile = os.path.join(base_dir, "uncertainty", str(self.uncertainty_method_name), case_id)
+                    os.makedirs(os.path.dirname(ofile), exist_ok=True)
+                    print(f'\nPredicting {os.path.basename(ofile_base)}:')
+                else:
+                    ofile = None
+                    print(f'\nPredicting image of shape {data.shape}:')
+                # added end
+
+
+                print(f'perform_everything_on_device: {self.perform_everything_on_device}')
+
+                properties = preprocessed['data_properties']
+
+                # let's not get into a runaway situation where the GPU predicts so fast that the disk has to be swamped with
+                # npy files
+                proceed = not check_workers_alive_and_busy(export_pool, worker_list, r, allowed_num_queued=2)
+                while not proceed:
+                    sleep(0.1)
+                    proceed = not check_workers_alive_and_busy(export_pool, worker_list, r, allowed_num_queued=2)
+
+                # convert to numpy to prevent uncatchable memory alignment errors from multiprocessing serialization of torch tensors
+                prediction = self.predict_logits_from_preprocessed_data(data).cpu().detach().numpy()
+
+                if ofile is not None:
+                    print('sending off prediction to background worker for resampling and export')
+                    r.append(
+                        export_pool.starmap_async(
+                            export_prediction_from_logits,
+                            ((prediction, properties, self.configuration_manager, self.plans_manager,
+                              self.dataset_json, ofile, save_probabilities),)
+                        )
+                    )
+                else:
+                    print('sending off prediction to background worker for resampling')
+                    r.append(
+                        export_pool.starmap_async(
+                            convert_predicted_logits_to_segmentation_with_correct_shape, (
+                                (prediction, self.plans_manager,
+                                 self.configuration_manager, self.label_manager,
+                                 properties,
+                                 save_probabilities),)
+                        )
+                    )
+                if ofile is not None:
+                    print(f'done with {os.path.basename(ofile)}')
+                else:
+                    print(f'\nDone with image of shape {data.shape}:')
+            ret = [i.get()[0] for i in r]
+
+        if isinstance(data_iterator, MultiThreadedAugmenter):
+            data_iterator._finish()
+
+        # clear lru cache
+        compute_gaussian.cache_clear()
+        # clear device cache
+        empty_cache(self.device)
+        return ret
 
 
 
@@ -477,9 +586,7 @@ class UncertaintyPredictor(nnUNetPredictor):
     def predict_logits_from_preprocessed_data_with_uncertainty(
             self,
             data: torch.Tensor,
-            use_mc_dropout: bool = True,
             mc_passes: int = 10,
-            use_tta: bool = False,
             tta_passes: int = 4,
     ) -> torch.Tensor:
         """
@@ -499,25 +606,18 @@ class UncertaintyPredictor(nnUNetPredictor):
             else:
                 self.network._orig_mod.load_state_dict(params)
 
-            if use_mc_dropout:
+            # network.eval or network.train
+            set_network_mode_for_inference(self.network, self.enable_mc_dropout)
 
-                self.network.train()  # enable dropout at inference
-                # ensure BN is off
-                for m in self.network.modules():
-                    if isinstance(m, torch.nn.modules.batchnorm._BatchNorm):
-                        m.eval()
-            else:
-                self.network.eval()
-
-            mc_iters = mc_passes if use_mc_dropout else 1
-            tta_iters = tta_passes if use_tta else 1
+            mc_iters = mc_passes if self.enable_mc_dropout else 1
+            tta_iters = tta_passes if self.enable_TTA_extended else 1
 
             for _ in range(mc_iters):
                 for _ in range(tta_iters):
                     # sliding window forward
                     #todo: add actual tta stuff here -> see TTApredictor, currently there is no TTaugmentation added to data
 
-                    logits = self.predict_sliding_window_return_logits(data).to('cpu')
+                    logits = self.predict_sliding_window_return_logits_uncertainty(data).to('cpu')
                     logits_samples.append(logits)
 
 
@@ -525,6 +625,141 @@ class UncertaintyPredictor(nnUNetPredictor):
 
         torch.set_num_threads(n_threads)
         return logits_samples
+
+    @torch.no_grad()
+    def _internal_predict_sliding_window_return_logits_uncertainty(self,
+                                                       data: torch.Tensor,
+                                                       slicers,
+                                                       do_on_device: bool = True,
+                                                       ):
+        """
+        copy of _internal_predict_sliding_window_return_logits
+        only difference is that it is preceded by @torch.no_grad() instead of  @torch.inference_mode()
+        """
+
+        predicted_logits = n_predictions = prediction = gaussian = workon = None
+        results_device = self.device if do_on_device else torch.device('cpu')
+
+        def producer(d, slh, q):
+            for s in slh:
+                q.put((torch.clone(d[s][None], memory_format=torch.contiguous_format).to(self.device), s))
+            q.put('end')
+
+        try:
+            empty_cache(self.device)
+
+            # move data to device
+            if self.verbose:
+                print(f'move image to device {results_device}')
+            data = data.to(results_device)
+            queue = Queue(maxsize=2)
+            t = Thread(target=producer, args=(data, slicers, queue))
+            t.start()
+
+            # preallocate arrays
+            if self.verbose:
+                print(f'preallocating results arrays on device {results_device}')
+            predicted_logits = torch.zeros((self.label_manager.num_segmentation_heads, *data.shape[1:]),
+                                           dtype=torch.half,
+                                           device=results_device)
+            n_predictions = torch.zeros(data.shape[1:], dtype=torch.half, device=results_device)
+
+            if self.use_gaussian:
+                gaussian = compute_gaussian(tuple(self.configuration_manager.patch_size), sigma_scale=1. / 8,
+                                            value_scaling_factor=10,
+                                            device=results_device)
+            else:
+                gaussian = 1
+
+            if not self.allow_tqdm and self.verbose:
+                print(f'running prediction: {len(slicers)} steps')
+
+            with tqdm(desc=None, total=len(slicers), disable=not self.allow_tqdm) as pbar:
+                while True:
+                    item = queue.get()
+                    if item == 'end':
+                        queue.task_done()
+                        break
+                    workon, sl = item
+                    prediction = self._internal_maybe_mirror_and_predict(workon)[0].to(results_device)
+
+                    if self.use_gaussian:
+                        prediction *= gaussian
+                    predicted_logits[sl] += prediction
+                    n_predictions[sl[1:]] += gaussian
+                    queue.task_done()
+                    pbar.update()
+            queue.join()
+
+            # predicted_logits /= n_predictions
+            torch.div(predicted_logits, n_predictions, out=predicted_logits)
+            # check for infs
+            if torch.any(torch.isinf(predicted_logits)):
+                raise RuntimeError('Encountered inf in predicted array. Aborting... If this problem persists, '
+                                   'reduce value_scaling_factor in compute_gaussian or increase the dtype of '
+                                   'predicted_logits to fp32')
+        except Exception as e:
+            del predicted_logits, n_predictions, prediction, gaussian, workon
+            empty_cache(self.device)
+            empty_cache(results_device)
+            raise e
+        return predicted_logits
+
+
+    @torch.no_grad()
+    def predict_sliding_window_return_logits_uncertainty(self, input_image: torch.Tensor) \
+            -> Union[np.ndarray, torch.Tensor]:
+        assert isinstance(input_image, torch.Tensor)
+        """
+        only modification is replace self.network.eval() with set_network_mode_for_inference
+        and uses _internal_predict_sliding_window_return_logits_uncertainty as _internal_predict_sliding_window_return_logits was preceded by @torch.inference_mode()
+        """
+        self.network = self.network.to(self.device)
+
+        # network.eval or network.train
+        set_network_mode_for_inference(self.network, self.enable_mc_dropout)
+
+        empty_cache(self.device)
+
+        # Autocast can be annoying
+        # If the device_type is 'cpu' then it's slow as heck on some CPUs (no auto bfloat16 support detection)
+        # and needs to be disabled.
+        # If the device_type is 'mps' then it will complain that mps is not implemented, even if enabled=False
+        # is set. Whyyyyyyy. (this is why we don't make use of enabled=False)
+        # So autocast will only be active if we have a cuda device.
+        with torch.autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
+            assert input_image.ndim == 4, 'input_image must be a 4D np.ndarray or torch.Tensor (c, x, y, z)'
+
+            if self.verbose:
+                print(f'Input shape: {input_image.shape}')
+                print("step_size:", self.tile_step_size)
+                print("mirror_axes:", self.allowed_mirroring_axes if self.use_mirroring else None)
+
+            # if input_image is smaller than tile_size we need to pad it to tile_size.
+            data, slicer_revert_padding = pad_nd_image(input_image, self.configuration_manager.patch_size,
+                                                       'constant', {'value': 0}, True,
+                                                       None)
+
+            slicers = self._internal_get_sliding_window_slicers(data.shape[1:])
+
+            if self.perform_everything_on_device and self.device != 'cpu':
+                # we need to try except here because we can run OOM in which case we need to fall back to CPU as a results device
+                try:
+                    predicted_logits = self._internal_predict_sliding_window_return_logits_uncertainty(data, slicers,
+                                                                                           self.perform_everything_on_device)
+                except RuntimeError:
+                    print(
+                        'Prediction on device was unsuccessful, probably due to a lack of memory. Moving results arrays to CPU')
+                    empty_cache(self.device)
+                    predicted_logits = self._internal_predict_sliding_window_return_logits_uncertainty(data, slicers, False)
+            else:
+                predicted_logits = self._internal_predict_sliding_window_return_logits_uncertainty(data, slicers,
+                                                                                       self.perform_everything_on_device)
+
+            empty_cache(self.device)
+            # revert padding
+            predicted_logits = predicted_logits[(slice(None), *slicer_revert_padding[1:])]
+        return predicted_logits
 
     def predict_from_files_uncertainty(
             # mirror of predict_from_files
@@ -592,11 +827,11 @@ class UncertaintyPredictor(nnUNetPredictor):
                                                                                  seg_from_prev_stage_files,
                                                                                  output_filename_truncated,
                                                                                  num_processes_preprocessing)
-
-        return self.predict_from_data_iterator_uncertainty(
-            data_iterator,
-            save_probabilities=save_probabilities
-        )
+        if not self.uncertainty_method_is_in_use:
+            # has correct output path, but does not calculate uncertainty maps
+            return self.predict_from_data_iterator_new_ofile(data_iterator, save_probabilities=save_probabilities)
+        else:
+            return self.predict_from_data_iterator_uncertainty(data_iterator, save_probabilities=save_probabilities)
         # todo: A few very important details -> currently regarless of whether we want the uncertainty_prediction or not it will go through the uncertainty predictor.
 
 

@@ -10,7 +10,8 @@ from nnunetv2.utilities.plans_handling.plans_handler import PlansManager, Config
 from nnunetv2.inference.export_prediction import convert_predicted_logits_to_segmentation_with_correct_shape
 
 def aggregate_logits_for_uncertainty(
-    logits_samples: Union[torch.Tensor, np.ndarray]
+    logits_samples: Union[torch.Tensor, np.ndarray],
+    eps: float = 1e-8
 ):
     """
     logits_samples: [S, C, ...]
@@ -32,7 +33,7 @@ def aggregate_logits_for_uncertainty(
     mean_probs = probs.mean(dim=0)
 
     # predictive entropy (Shannon netropy in nats = log(C))
-    entropy = -(mean_probs * torch.log(mean_probs + 1e-8)).sum(dim=0) #1e-8 added to avoid potential log(0)
+    entropy = -(mean_probs * torch.log(mean_probs + eps)).sum(dim=0) #eps added to avoid potential log(0)
     # Normalized entropy in [0, 1]
     nr_classes = mean_probs.shape[0]
     normalized_entropy = entropy/torch.log(torch.tensor(nr_classes, device=entropy.device))
@@ -43,7 +44,7 @@ def aggregate_logits_for_uncertainty(
     #variance = logits_samples.var(dim=0).mean(dim=0) # version where computed on logits
 
     # add Mutual information here (epistemic uncertainty metric)
-    expected_entropy = -(probs * torch.log(probs + 1e-8)).sum(dim=1).mean(dim=0)
+    expected_entropy = -(probs * torch.log(probs + eps)).sum(dim=1).mean(dim=0)
     mutual_information = entropy - expected_entropy # note that entropy is not normalized
     # Normalized MI in [0, 1]
     normalized_mutual_information = mutual_information/torch.log(torch.tensor(nr_classes, device=entropy.device))
