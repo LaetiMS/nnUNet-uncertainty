@@ -62,6 +62,7 @@ def aggregate_logits_for_uncertainty(
 
     # variance of probabilities (averaged over classes)
     variance = probabilities.var(dim=0).mean(dim=0) #to avoid computing variance on logits (who are not scale-invariant / highly sensitive to class imbalance)
+    #todo: variance currently makes ITK-snap crash maybe because it has nan values or something? Double check!
     # variance over samples, averaged over classes
     #variance = logits_samples.var(dim=0).mean(dim=0) # version where computed on logits
 
@@ -156,7 +157,7 @@ def export_uncertainty_from_logits(
 
         vol = vol.transpose(plans_manager.transpose_backward)
 
-        rw.write_seg(
+        rw.write_image_float(
             vol,
             output_file_truncated + f"_{name}" + dataset_json_dict_or_file['file_ending'],
             properties_dict

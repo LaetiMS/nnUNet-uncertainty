@@ -127,6 +127,39 @@ class SimpleITKIO(BaseReaderWriter):
         itk_image.SetDirection(properties['sitk_stuff']['direction'])
 
         sitk.WriteImage(itk_image, output_fname, True)
+    def write_image_float(self, img: np.ndarray, output_fname: str, properties: dict) -> None:
+        """
+        Writes a continuous-valued image (probabilities, entropy, variance, etc.)
+        Supports 2D and 3D nnU-Net style tensors.
+        """
+        #todo: debug / write test and write for other functions also!
+        assert img.ndim in (3, 4), (
+            "Expected img with shape (C, H, W), (C, D, H, W) or already squeezed"
+        )
+
+        output_dimension = len(properties['sitk_stuff']['spacing'])
+        assert 1 < output_dimension < 4
+
+        # Handle nnU-Net 2D case: shape (1, H, W)
+        if output_dimension == 2:
+            if img.ndim == 3:
+                img = img[0]
+            elif img.ndim == 4:
+                img = img[0, 0]
+
+        # If channel dimension exists (e.g. probabilities), ensure single-channel
+        if img.ndim == 4:
+            raise RuntimeError(
+                "write_image_float expects a single-channel image. "
+                "If you have multiple channels, write them separately."
+            )
+
+        itk_image = sitk.GetImageFromArray(img.astype(np.float32, copy=False))
+        itk_image.SetSpacing(properties['sitk_stuff']['spacing'])
+        itk_image.SetOrigin(properties['sitk_stuff']['origin'])
+        itk_image.SetDirection(properties['sitk_stuff']['direction'])
+
+        sitk.WriteImage(itk_image, output_fname, True)
 
 
 class SimpleITKIOWithReorient(SimpleITKIO):
