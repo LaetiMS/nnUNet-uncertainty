@@ -331,7 +331,7 @@ class UncertaintyPredictor(nnUNetPredictor):
                     swag_snapshots_path = join(fold_dir, 'swag_snapshots')
                     # check if path exists
                     if isdir(swag_snapshots_path):
-                        swag_files = sorted(glob(join(swag_snapshots_path, 'epochs_*.pth')))
+                        swag_files = sorted(glob(join(swag_snapshots_path, 'epoch_*.pth')))
                         if len(swag_files) == 0:
                             raise RuntimeError(f"No SWAG snapshots found in {swag_snapshots_path}")
                         else:
