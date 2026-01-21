@@ -349,16 +349,8 @@ class UncertaintyPredictor(nnUNetPredictor):
                                 sd = strip_orig_mod_prefix(sd)
                                 swag_checkpoints.append(sd)
 
-                            #swag_checkpoints = [
-                            #    torch.load(swag_ckpt, map_location=torch.device('cpu'), weights_only=False)
-                            #    for swag_ckpt in swag_files
-                            #]
                             parameters.extend(swag_checkpoints)
 
-                            # swag_checkpoints = [torch.load(swag_ckpt,
-                            #                               map_location=torch.device('cpu'), weights_only=False)[
-                            #                        'network_weights'] for swag_ckpt in swag_files]
-                            # parameters.extend(swag_checkpoints)
 
                     # --- load final checkpoint ---
                     final_ckpt = torch.load(join(fold_dir, checkpoint_name), map_location=torch.device('cpu'), weights_only=False)
