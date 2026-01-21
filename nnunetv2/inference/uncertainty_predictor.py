@@ -55,6 +55,11 @@ def set_network_mode_for_inference(network: torch.nn.Module, enable_mc_dropout: 
     else:
         network.eval()
 
+def strip_orig_mod_prefix(state_dict):
+    return {
+        k.replace('_orig_mod.', '', 1): v
+        for k, v in state_dict.items()
+    }
 
 
 class MCDropoutPredictor(nnUNetPredictor):
@@ -335,10 +340,25 @@ class UncertaintyPredictor(nnUNetPredictor):
                         if len(swag_files) == 0:
                             raise RuntimeError(f"No SWAG snapshots found in {swag_snapshots_path}")
                         else:
-                            swag_checkpoints = [torch.load(swag_ckpt,
-                                                           map_location=torch.device('cpu'), weights_only=False)[
-                                                    'network_weights'] for swag_ckpt in swag_files]
+
+                            swag_checkpoints = []
+                            for swag_ckpt in swag_files:
+                                #your SWAG snapshots are raw state_dicts, not nnU-Net–style checkpoints
+                                sd = torch.load(swag_ckpt, map_location=torch.device('cpu'), weights_only=False)
+                                # remove _orig_mod from all keys -> allows to load_state_dict()
+                                sd = strip_orig_mod_prefix(sd)
+                                swag_checkpoints.append(sd)
+
+                            #swag_checkpoints = [
+                            #    torch.load(swag_ckpt, map_location=torch.device('cpu'), weights_only=False)
+                            #    for swag_ckpt in swag_files
+                            #]
                             parameters.extend(swag_checkpoints)
+
+                            # swag_checkpoints = [torch.load(swag_ckpt,
+                            #                               map_location=torch.device('cpu'), weights_only=False)[
+                            #                        'network_weights'] for swag_ckpt in swag_files]
+                            # parameters.extend(swag_checkpoints)
 
                     # --- load final checkpoint ---
                     final_ckpt = torch.load(join(fold_dir, checkpoint_name), map_location=torch.device('cpu'), weights_only=False)
