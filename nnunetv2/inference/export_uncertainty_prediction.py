@@ -68,6 +68,7 @@ def aggregate_logits_for_uncertainty(
 
     # add Mutual information here (epistemic uncertainty metric)
     expected_entropy = -(probabilities * torch.log(probabilities + eps)).sum(dim=1).mean(dim=0)
+    #todo: mutual information seems to be overcrowded
     mutual_information = entropy - expected_entropy # note that entropy is not normalized
     # Normalized MI in [0, 1]
     normalized_mutual_information = mutual_information/torch.log(torch.tensor(nr_classes, device=entropy.device))
