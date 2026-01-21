@@ -40,17 +40,7 @@ from glob import glob
 
 from contextlib import contextmanager
 
-@contextmanager
-def inference_context(self):
-    """
-    Allows to select the inference mode that certain functions will be run with
-    """
-    if self.enable_mc_dropout:
-        with torch.no_grad():
-            yield
-    else:
-        with torch.inference_mode():
-            yield
+
 
 
 
@@ -327,6 +317,17 @@ class UncertaintyPredictor(nnUNetPredictor):
 
         # todo: add layered_ensembles
 
+    @contextmanager
+    def _inference_context(self):
+        """
+        Allows to select the inference mode that certain functions will be run with
+        """
+        if self.enable_mc_dropout:
+            with torch.no_grad():
+                yield
+        else:
+            with torch.inference_mode():
+                yield
 
     def initialize_from_trained_model_folder(self, model_training_output_dir: str,
                                              use_folds: Union[Tuple[Union[int, str]], None],
@@ -587,7 +588,7 @@ class UncertaintyPredictor(nnUNetPredictor):
                 logits_samples = []
 
                 # Use inference_mode when possible (lower memory), otherwise no_grad for MC Dropout
-                with self.inference_context():
+                with self._inference_context():
                     # predict_logits_from_preprocessed_data_with_uncertainty
                     # returns a tensor of shape [S, C, H, W, D] (already stacked)
                     logits_samples = self.predict_logits_from_preprocessed_data_with_uncertainty(data)
@@ -689,7 +690,7 @@ class UncertaintyPredictor(nnUNetPredictor):
                     #todo: add actual tta stuff here -> see TTApredictor, currently there is no TTaugmentation added to data
 
                     # select appropriate inference context (inference_mode or no_grad)
-                    with self.inference_context():
+                    with self._inference_context():
                         logits = self.predict_sliding_window_return_logits_uncertainty(data)
 
                     # logits is already on CPU if GPU OOM hapened
@@ -827,7 +828,7 @@ class UncertaintyPredictor(nnUNetPredictor):
                 # we need to try except here because we can run OOM in which case we need to fall back to CPU as a results device
                 try:
                     # select appropriate inference context (inference_mode or no_grad)
-                    with self.inference_context():
+                    with self._inference_context():
                         predicted_logits = self._internal_predict_sliding_window_return_logits_uncertainty(data, slicers,
                                                                                            self.perform_everything_on_device)
                 except RuntimeError:
@@ -835,11 +836,11 @@ class UncertaintyPredictor(nnUNetPredictor):
                         'Prediction on device was unsuccessful, probably due to a lack of memory. Moving results arrays to CPU')
                     empty_cache(self.device)
                     # select appropriate inference context (inference_mode or no_grad)
-                    with self.inference_context():
+                    with self._inference_context():
                         predicted_logits = self._internal_predict_sliding_window_return_logits_uncertainty(data, slicers, False)
             else:
                 # select appropriate inference context (inference_mode or no_grad)
-                with self.inference_context():
+                with self._inference_context():
                     predicted_logits = self._internal_predict_sliding_window_return_logits_uncertainty(data, slicers,
                                                                                        self.perform_everything_on_device)
 
