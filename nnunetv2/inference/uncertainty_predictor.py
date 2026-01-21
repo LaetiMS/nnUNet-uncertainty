@@ -537,54 +537,77 @@ class UncertaintyPredictor(nnUNetPredictor):
         """
 
         results = [] # r
+        with multiprocessing.get_context("spawn").Pool(num_processes_segmentation_export) as export_pool:
+            worker_list= [i for i in export_pool._pool]
+            r = []
 
-        for preprocessed in data_iterator:
-            data = preprocessed['data']
-            if isinstance(data, str):
-                delfile = data
-                data = torch.from_numpy(np.load(data))
-                os.remove(delfile)
+            for preprocessed in data_iterator:
+                data = preprocessed['data']
+                if isinstance(data, str):
+                    delfile = data
+                    data = torch.from_numpy(np.load(data))
+                    os.remove(delfile)
 
-            ofile_base = preprocessed['ofile']
-            # structure based on uncertainty method
-            if ofile_base is not None:
-                case_id = os.path.basename(ofile_base)
-                base_dir = os.path.dirname(ofile_base)
-                ofile = os.path.join(base_dir, "uncertainty", str(self.uncertainty_method_name), case_id)
-                os.makedirs(os.path.dirname(ofile), exist_ok=True)
-                print(f'\nPredicting {os.path.basename(ofile_base)}:')
-            else:
-                ofile = None
-                print(f'\nPredicting image of shape {data.shape}:')
+                ofile_base = preprocessed['ofile']
+                # structure based on uncertainty method
+                if ofile_base is not None:
+                    case_id = os.path.basename(ofile_base)
+                    base_dir = os.path.dirname(ofile_base)
+                    ofile = os.path.join(base_dir, "uncertainty", str(self.uncertainty_method_name), case_id)
+                    os.makedirs(os.path.dirname(ofile), exist_ok=True)
+                    print(f'\nPredicting {os.path.basename(ofile_base)}:')
+                else:
+                    ofile = None
+                    print(f'\nPredicting image of shape {data.shape}:')
 
-            print(f'perform_everything_on_device: {self.perform_everything_on_device}')
+                print(f'perform_everything_on_device: {self.perform_everything_on_device}')
 
-            properties = preprocessed['data_properties']
+                properties = preprocessed['data_properties']
 
-            # Run stochastic interference and convert to numpy to prevent uncatchable memory alignment errors from multiprocessing serialization of torch tensors
-            logits_samples = self.predict_logits_from_preprocessed_data_with_uncertainty(
-                data
-            ).cpu().detach().numpy()  # shape [S, C, ...]
+                # on main GPU
+                # Run stochastic interference and convert to numpy to prevent uncatchable memory alignment errors from multiprocessing serialization of torch tensors
 
-            # 2. Export (main process!)
-            if ofile is not None:
-                export_uncertainty_from_logits(
-                    logits_samples,
-                    properties,
-                    self.configuration_manager,
-                    self.plans_manager,
-                    self.dataset_json,
-                    ofile,
-                    save_probabilities=save_probabilities
-                )
-                print(f'done with {os.path.basename(ofile)}')
-            else:
-                # return results instead of writing
-                results.append(logits_samples)
-            print('done')
+                logits_samples = self.predict_logits_from_preprocessed_data_with_uncertainty(
+                    data
+                ).cpu().detach().numpy()  # shape [S, C, ...]
 
-        #if isinstance(data_iterator, MultiThreadedAugmenter):
-        #    data_iterator._finish()
+                # let's not get into a runaway situation where the GPU predicts so fast that the disk has to be swamped with
+                # npy files
+                proceed = not check_workers_alive_and_busy(export_pool, worker_list, r, allowed_num_queued=2)
+                while not proceed:
+                    sleep(0.1)
+                    proceed = not check_workers_alive_and_busy(export_pool, worker_list, r, allowed_num_queued=2)
+
+
+                # 2. Export (main process!) and offload CPU postprocessing
+                if ofile is not None:
+                    r.append(
+                        export_pool.starmap_async(
+                            export_uncertainty_from_logits,
+                            [(
+                                logits_samples,
+                                properties,
+                                self.configuration_manager,
+                                self.plans_manager,
+                                self.dataset_json,
+                                ofile,
+                                save_probabilities
+                            )]
+                        )
+                    )
+
+                    print(f'done with {os.path.basename(ofile)}')
+                else:
+                    # return results instead of writing
+                    results.append(logits_samples)
+                print('done')
+
+                # Wait for all exports to finish
+                for job in r:
+                    job.get()
+
+        if isinstance(data_iterator, MultiThreadedAugmenter):
+            data_iterator._finish()
 
         # cleanup (nnU-Net style)
         compute_gaussian.cache_clear()
