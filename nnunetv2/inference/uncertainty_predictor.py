@@ -38,6 +38,22 @@ from nnunetv2.utilities.plans_handling.plans_handler import PlansManager, Config
 
 from glob import glob
 
+from contextlib import contextmanager
+
+@contextmanager
+def inference_context(self):
+    """
+    Allows to select the inference mode that certain functions will be run with
+    """
+    if self.enable_mc_dropout:
+        with torch.no_grad():
+            yield
+    else:
+        with torch.inference_mode():
+            yield
+
+
+
 def set_network_mode_for_inference(network: torch.nn.Module, enable_mc_dropout: bool):
     """
     Sets the network in inference mode with optional MC dropout.
@@ -60,6 +76,7 @@ def strip_orig_mod_prefix(state_dict):
         k.replace('_orig_mod.', '', 1): v
         for k, v in state_dict.items()
     }
+
 
 
 class MCDropoutPredictor(nnUNetPredictor):
@@ -567,9 +584,26 @@ class UncertaintyPredictor(nnUNetPredictor):
                 # on main GPU
                 # Run stochastic interference and convert to numpy to prevent uncatchable memory alignment errors from multiprocessing serialization of torch tensors
 
-                logits_samples = self.predict_logits_from_preprocessed_data_with_uncertainty(
-                    data
-                ).cpu().detach().numpy()  # shape [S, C, ...]
+                logits_samples = []
+
+                # Use inference_mode when possible (lower memory), otherwise no_grad for MC Dropout
+                with self.inference_context():
+                    # predict_logits_from_preprocessed_data_with_uncertainty
+                    # returns a tensor of shape [S, C, H, W, D] (already stacked)
+                    logits_samples = self.predict_logits_from_preprocessed_data_with_uncertainty(data)
+
+                # At this point:
+                # - GPU memory pressure already happened (inside sliding window)
+                # - logits_samples may be on GPU or CPU depending on OOM fallback
+
+                # Ensure results are on CPU
+                if isinstance(logits_samples, torch.Tensor) and logits_samples.device.type == "cuda":
+                    logits_samples = logits_samples.cpu()
+
+                # Convert to numpy only if required downstream
+                logits_samples = logits_samples.numpy()
+
+
 
                 # let's not get into a runaway situation where the GPU predicts so fast that the disk has to be swamped with
                 # npy files
@@ -617,7 +651,7 @@ class UncertaintyPredictor(nnUNetPredictor):
 
 
 
-    @torch.no_grad()
+    #@torch.no_grad()
     def predict_logits_from_preprocessed_data_with_uncertainty(
             self,
             data: torch.Tensor,
@@ -628,6 +662,8 @@ class UncertaintyPredictor(nnUNetPredictor):
         Returns:
             logits_samples: [S, C, ...], where S is the number of stochastic forward passes
             where S = (#SWAG checkpoints) × mc_passes × tta_passes
+
+        Memory-efficient: moves each pass to CPU immediately (to avoid OOM on GPU)
         """
         n_threads = torch.get_num_threads()
         torch.set_num_threads(default_num_processes if default_num_processes < n_threads else n_threads)
@@ -652,16 +688,22 @@ class UncertaintyPredictor(nnUNetPredictor):
                     # sliding window forward
                     #todo: add actual tta stuff here -> see TTApredictor, currently there is no TTaugmentation added to data
 
-                    logits = self.predict_sliding_window_return_logits_uncertainty(data).to('cpu')
+                    # select appropriate inference context (inference_mode or no_grad)
+                    with self.inference_context():
+                        logits = self.predict_sliding_window_return_logits_uncertainty(data)
+
+                    # logits is already on CPU if GPU OOM hapened
+                    # If it survived on GPU, move it once
+                    if logits.device.type == "cuda":
+                        logits = logits.cpu()
                     logits_samples.append(logits)
 
-
+        # stack all passes on CPU
         logits_samples = torch.stack(logits_samples, dim=0)  # shape [S, C, ...]
 
         torch.set_num_threads(n_threads)
         return logits_samples
 
-    @torch.no_grad()
     def _internal_predict_sliding_window_return_logits_uncertainty(self,
                                                        data: torch.Tensor,
                                                        slicers,
@@ -669,7 +711,9 @@ class UncertaintyPredictor(nnUNetPredictor):
                                                        ):
         """
         copy of _internal_predict_sliding_window_return_logits
-        only difference is that it is preceded by @torch.no_grad() instead of  @torch.inference_mode()
+        but nolonger decorated with @torch.inference_mode() as needs to allow for network.eval for MCDropout (i.e. @torch.no_grad()).
+
+        NB: using torch.no_grad() instead of torch.inference_mode() will cause GPU OOM and will shift the prediction onto CPU
         """
 
         predicted_logits = n_predictions = prediction = gaussian = workon = None
@@ -741,13 +785,15 @@ class UncertaintyPredictor(nnUNetPredictor):
         return predicted_logits
 
 
-    @torch.no_grad()
     def predict_sliding_window_return_logits_uncertainty(self, input_image: torch.Tensor) \
             -> Union[np.ndarray, torch.Tensor]:
         assert isinstance(input_image, torch.Tensor)
         """
         only modification is replace self.network.eval() with set_network_mode_for_inference
-        and uses _internal_predict_sliding_window_return_logits_uncertainty as _internal_predict_sliding_window_return_logits was preceded by @torch.inference_mode()
+        and uses _internal_predict_sliding_window_return_logits_uncertainty as _internal_predict_sliding_window_return_logits
+        
+        Compared to og - it is nolonger decorated with @torch.inference_mode() as needs to allow for network.eval for MCDropout (i.e. @torch.no_grad()). 
+        NB: using torch.no_grad() instead of torch.inference_mode() will cause GPU OOM and will shift the prediction onto CPU
         """
         self.network = self.network.to(self.device)
 
@@ -780,15 +826,21 @@ class UncertaintyPredictor(nnUNetPredictor):
             if self.perform_everything_on_device and self.device != 'cpu':
                 # we need to try except here because we can run OOM in which case we need to fall back to CPU as a results device
                 try:
-                    predicted_logits = self._internal_predict_sliding_window_return_logits_uncertainty(data, slicers,
+                    # select appropriate inference context (inference_mode or no_grad)
+                    with self.inference_context():
+                        predicted_logits = self._internal_predict_sliding_window_return_logits_uncertainty(data, slicers,
                                                                                            self.perform_everything_on_device)
                 except RuntimeError:
                     print(
                         'Prediction on device was unsuccessful, probably due to a lack of memory. Moving results arrays to CPU')
                     empty_cache(self.device)
-                    predicted_logits = self._internal_predict_sliding_window_return_logits_uncertainty(data, slicers, False)
+                    # select appropriate inference context (inference_mode or no_grad)
+                    with self.inference_context():
+                        predicted_logits = self._internal_predict_sliding_window_return_logits_uncertainty(data, slicers, False)
             else:
-                predicted_logits = self._internal_predict_sliding_window_return_logits_uncertainty(data, slicers,
+                # select appropriate inference context (inference_mode or no_grad)
+                with self.inference_context():
+                    predicted_logits = self._internal_predict_sliding_window_return_logits_uncertainty(data, slicers,
                                                                                        self.perform_everything_on_device)
 
             empty_cache(self.device)
