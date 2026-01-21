@@ -583,8 +583,8 @@ class UncertaintyPredictor(nnUNetPredictor):
                 results.append(logits_samples)
             print('done')
 
-        if isinstance(data_iterator, MultiThreadedAugmenter):
-            data_iterator._finish()
+        #if isinstance(data_iterator, MultiThreadedAugmenter):
+        #    data_iterator._finish()
 
         # cleanup (nnU-Net style)
         compute_gaussian.cache_clear()
