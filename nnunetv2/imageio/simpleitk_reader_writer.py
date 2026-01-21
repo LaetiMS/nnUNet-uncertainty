@@ -154,7 +154,11 @@ class SimpleITKIO(BaseReaderWriter):
                 "If you have multiple channels, write them separately."
             )
 
-        itk_image = sitk.GetImageFromArray(img.astype(np.float32, copy=False))
+            # Ensure contiguous float32
+        img = np.ascontiguousarray(img, dtype=np.float32)
+
+        itk_image = sitk.GetImageFromArray(img, isVector=False)
+        itk_image = sitk.Cast(itk_image, sitk.sitkFloat32)
         itk_image.SetSpacing(properties['sitk_stuff']['spacing'])
         itk_image.SetOrigin(properties['sitk_stuff']['origin'])
         itk_image.SetDirection(properties['sitk_stuff']['direction'])
