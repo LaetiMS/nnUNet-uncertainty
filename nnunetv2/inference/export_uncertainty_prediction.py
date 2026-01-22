@@ -1,5 +1,5 @@
 from typing import Union, List
-
+from pathlib import Path
 import numpy as np
 import torch
 from acvl_utils.cropping_and_padding.bounding_boxes import insert_crop_into_image
@@ -158,9 +158,16 @@ def export_uncertainty_from_logits(
 
         vol = vol.transpose(plans_manager.transpose_backward)
 
+        # save uncertainty maps in a separate folder: uncertainty_maps
+        p = Path(output_file_truncated)
+        patient_id = p.name
+        base_output_path = p.parent
+        uncertainty_maps_dir = base_output_path / "uncertainty_maps"
+        uncertainty_maps_dir.mkdir(parents=True, exist_ok=True)
+
         rw.write_image_float(
             vol,
-            output_file_truncated + f"_{name}" + dataset_json_dict_or_file['file_ending'],
+            str(uncertainty_maps_dir/ f"{patient_id}_{name}{dataset_json_dict_or_file['file_ending']}" ),
             properties_dict
         )
 
