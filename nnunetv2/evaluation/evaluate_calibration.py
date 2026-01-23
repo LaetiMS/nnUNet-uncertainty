@@ -83,12 +83,15 @@ def compute_probabilistic_metrics(
         }
     }
     """
+
     # --- Load GT and probabilities ---
     seg_ref, _ = image_reader_writer.read_seg(reference_file)
     seg_ref = seg_ref[0]  # remove singleton --> now shape [X,Y,Z] #todo check
-    probs, _ = image_reader_writer.read_seg(probability_file)
+    #probs, _ = image_reader_writer.read_seg(probability_file)
+    probs = np.load(probability_file)['probabilities']               # probabilities
 
-    # probs can be [C, X, Y, Z] or [X, Y, Z] (binary FG prob), if binary stored as [X,Y,Z], convert to [2,X,Y,Z]
+
+# probs can be [C, X, Y, Z] or [X, Y, Z] (binary FG prob), if binary stored as [X,Y,Z], convert to [2,X,Y,Z]
     if probs.ndim == seg_ref.ndim: #binary case [X,Y,Z]
         probs = np.stack([1.0 - probs, probs], axis=0) # [2,X,Y,Z]
 
@@ -102,56 +105,58 @@ def compute_probabilistic_metrics(
         "metrics": {}
     }
 
-    # --- Define valid mask (exclude ignored voxels if any) ---
-    if ignore_mask is not None:
-        valid_mask = ~ignore_mask
-    else:
-        valid_mask = np.ones_like(seg_ref, dtype=bool)
+    # --- Loop over labels / regions (same philosophy as compute_metrics) ---
+    for r in labels_or_regions:
+        results["metrics"][r] = {}
 
-        # --- Function to compute metrics given a boolean mask ---
-    def compute_metrics_for_mask(mask: np.ndarray, name: str):
-        if not np.any(mask):
-            return {
-                "NLL": np.nan,
-                "Brier": np.nan,
-                "ECE": np.nan,
-                "n_voxels": 0
-            }
+        # GT mask for this region (bool)
+        gt_mask = region_or_label_to_mask(seg_ref, r)
 
+        if ignore_mask is not None:
+            # add explicit calculation of valid_voxels -> done in compute_tp_fp_fn_tn implicitly (use_mask)
+            valid_mask = ~ignore_mask if ignore_mask is not None else np.ones_like(seg_ref, bool)
+        else:
+            valid_mask = np.ones_like(gt_mask, dtype=bool)
+
+        # only foreground computation by default
+        eval_mask = gt_mask & valid_mask #bool
+
+        if not np.any(eval_mask):
+            results["metrics"][r]["NLL"] = np.nan
+            results["metrics"][r]["Brier"] = np.nan
+            results["metrics"][r]["ECE"] = np.nan
+            results["metrics"][r]["n_voxels"] = 0
+            continue
+
+        # --- Extract probabilities ---
         # Ground truth for selected voxels
-        gt_voxels = seg_ref[mask].astype(int)  # [nr_valid_voxels]
+        gt_voxels = seg_ref[eval_mask].astype(int) # shape [nr_valid_voxels] or  seg_ref[0][eval_mask] to remove singleton [1,X,Y,Z]
+        # probs has shape [C, D, H, W], keep all classes
+        probs_eval = probs[:, eval_mask]  # shape [nr_classes, nr_valid_voxels]
+        # # transpose to match metric function format
+        probs_eval = probs_eval.T  # shape [nr_valid_voxels, nr_classes] #todo check -> check also that there is no issue with shape
 
-        # Probabilities for selected voxels
-        probs_eval = probs[:, mask]            # [nr_classes, nr_valid_voxels]
-        probs_eval = probs_eval.T               # [nr_valid_voxels, nr_classes]
-
-        # Negative Log-Likelihood
-        p_true = probs_eval[np.arange(gt_voxels.size), gt_voxels]
+        # --- Negative Log-Likelihood (multiclass) ---
+        p_true = probs_eval[np.arange(gt_voxels.size), gt_voxels] #if probs_eval was transposed
+        # p_true = probs_eval[gt_voxels, np.arange(gt_voxels.size)] # if probs_eval was not transposed
         nll = float(-np.mean(np.log(p_true + eps)))
 
-        # Brier score
-        y_onehot = np.eye(nr_classes)[gt_voxels]
-        brier = float(np.mean(np.sum((probs_eval - y_onehot) ** 2, axis=1)))
+        # --- Brier score (multiclass) ---
+        y_onehot = np.eye(nr_classes)[gt_voxels] # shape [nr_valid_voxels, nr_classes]
+        brier = float(np.mean(np.sum((probs_eval - y_onehot) **2, axis=1)))
 
-        # Expected Calibration Error
+        # --- Expected Calibration Error (multiclass)---
         pred = np.argmax(probs_eval, axis=1)
         confidence = np.max(probs_eval, axis=1)
         correct = pred == gt_voxels
+
         ece = compute_ece(confidence, correct, n_bins=n_bins)
 
-        return {
-            "NLL": nll,
-            "Brier": brier,
-            "ECE": ece,
-            "n_voxels": int(mask.sum())
-        }
-
-    # --- Compute metrics for all voxels ---
-    results["metrics"]["all"] = compute_metrics_for_mask(valid_mask, "all")
-
-    # --- Compute metrics for foreground only (seg_ref > 0) ---
-    foreground_mask = valid_mask & (seg_ref > 0)
-    results["metrics"]["foreground"] = compute_metrics_for_mask(foreground_mask, "foreground")
+        # --- Store results ---
+        results["metrics"][r]["NLL"] = nll
+        results["metrics"][r]["Brier"] = brier
+        results["metrics"][r]["ECE"] = ece
+        results["metrics"][r]["n_voxels"] = int(eval_mask.sum())
 
     return results
 
@@ -308,7 +313,7 @@ def compute_probabilistic_metrics_on_folder(folder_ref: str, folder_prob: str, o
     files_prob = list(folder_prob.glob("*.npz"))
 
     # --- align by patient ID (stem) ---
-    ref_map = {f.stem: f for f in files_ref}
+    ref_map = {f.name.replace(".nii.gz", "").replace(".nii", ""): f for f in files_ref}
     prob_map = {f.stem: f for f in files_prob}
 
     common_keys = sorted(set(ref_map) & set(prob_map))
@@ -330,13 +335,23 @@ def compute_probabilistic_metrics_on_folder(folder_ref: str, folder_prob: str, o
         [eps] * len(aligned_prob)
     )
 
-    with multiprocessing.get_context("spawn").Pool(num_processes) as pool:
-        # for i in list(zip(files_ref, files_prob, [image_reader_writer] * len(files_prob), [regions_or_labels] * len(files_prob), [ignore_label] * len(files_prob))):
-        #     compute_metrics(*i)
-        results = pool.starmap(
-            compute_probabilistic_metrics,
-            args
-        )
+    # no multiprocessing
+    results = []
+    for a in args:
+        try:
+            r = compute_probabilistic_metrics(*a)
+            results.append(r)
+        except Exception as e:
+            print(f"Error processing {a[0]}: {e}")
+            raise
+    # multiprocessing
+    # with multiprocessing.get_context("spawn").Pool(num_processes) as pool:
+    #     # for i in list(zip(files_ref, files_prob, [image_reader_writer] * len(files_prob), [regions_or_labels] * len(files_prob), [ignore_label] * len(files_prob))):
+    #     #     compute_metrics(*i)
+    #     results = pool.starmap(
+    #         compute_probabilistic_metrics,
+    #         args
+    #     )
 
     # mean metric per class
     metric_list = list(results[0]['metrics'][regions_or_labels[0]].keys())
