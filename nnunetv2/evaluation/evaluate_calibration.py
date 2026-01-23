@@ -335,23 +335,14 @@ def compute_probabilistic_metrics_on_folder(folder_ref: str, folder_prob: str, o
         [eps] * len(aligned_prob)
     )
 
-    # no multiprocessing
-    results = []
-    for a in args:
-        try:
-            r = compute_probabilistic_metrics(*a)
-            results.append(r)
-        except Exception as e:
-            print(f"Error processing {a[0]}: {e}")
-            raise
     # multiprocessing
-    # with multiprocessing.get_context("spawn").Pool(num_processes) as pool:
-    #     # for i in list(zip(files_ref, files_prob, [image_reader_writer] * len(files_prob), [regions_or_labels] * len(files_prob), [ignore_label] * len(files_prob))):
-    #     #     compute_metrics(*i)
-    #     results = pool.starmap(
-    #         compute_probabilistic_metrics,
-    #         args
-    #     )
+    with multiprocessing.get_context("spawn").Pool(num_processes) as pool:
+        # for i in list(zip(files_ref, files_prob, [image_reader_writer] * len(files_prob), [regions_or_labels] * len(files_prob), [ignore_label] * len(files_prob))):
+        #     compute_metrics(*i)
+        results = pool.starmap(
+            compute_probabilistic_metrics,
+            args
+        )
 
     # mean metric per class
     metric_list = list(results[0]['metrics'][regions_or_labels[0]].keys())
