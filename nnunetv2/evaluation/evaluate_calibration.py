@@ -6,6 +6,7 @@
 import multiprocessing
 import numpy as np
 from typing import Union, List, Tuple, Optional
+from pathlib import Path
 
 from batchgenerators.utilities.file_and_folder_operations import subfiles, join, save_json, load_json, \
     isfile
@@ -297,20 +298,44 @@ def compute_probabilistic_metrics_on_folder(folder_ref: str, folder_prob: str, o
     """
     if output_file is not None:
         assert output_file.endswith('.json'), 'output_file should end with .json'
-    files_prob = subfiles(folder_prob, suffix=file_ending, join=False)
-    files_ref = subfiles(folder_ref, suffix=file_ending, join=False)
+    folder_ref = Path(folder_ref)
+    folder_prob = Path(folder_prob)
+
+    # --- get ref files ---
+    files_ref = list(folder_ref.glob("*.nii.gz"))
+
+    # --- get only .npz files in folder_prob ---
+    files_prob = list(folder_prob.glob("*.npz"))
+
+    # --- align by patient ID (stem) ---
+    ref_map = {f.stem: f for f in files_ref}
+    prob_map = {f.stem: f for f in files_prob}
+
+    common_keys = sorted(set(ref_map) & set(prob_map))
+
+    aligned_ref = [str(ref_map[k]) for k in common_keys]
+    aligned_prob = [str(prob_map[k]) for k in common_keys]
+
     if not chill:
-        present = [isfile(join(folder_prob, i)) for i in files_ref]
-        assert all(present), "Not all files in folder_ref exist in folder_prob"
-    files_ref = [join(folder_ref, i) for i in files_prob]
-    files_prob= [join(folder_prob, i) for i in files_prob]
+        missing = set(ref_map) - set(prob_map)
+        assert not missing, f"Missing probabilistic files for: {missing}"
+        # --- prepare args ---
+    args = zip(
+        aligned_ref,
+        aligned_prob,
+        [image_reader_writer] * len(aligned_prob),
+        [regions_or_labels] * len(aligned_prob),
+        [ignore_label] * len(aligned_prob),
+        [n_bins] * len(aligned_prob),
+        [eps] * len(aligned_prob)
+    )
+
     with multiprocessing.get_context("spawn").Pool(num_processes) as pool:
         # for i in list(zip(files_ref, files_prob, [image_reader_writer] * len(files_prob), [regions_or_labels] * len(files_prob), [ignore_label] * len(files_prob))):
         #     compute_metrics(*i)
         results = pool.starmap(
             compute_probabilistic_metrics,
-            list(zip(files_ref, files_prob, [image_reader_writer] * len(files_prob), [regions_or_labels] * len(files_prob),
-                     [ignore_label] * len(files_prob), [n_bins] * len(files_prob), [eps] * len(files_prob)))
+            args
         )
 
     # mean metric per class
