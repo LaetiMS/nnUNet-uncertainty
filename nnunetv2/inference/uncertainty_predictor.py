@@ -50,6 +50,20 @@ from glob import glob
 
 from contextlib import contextmanager
 
+from monai.transforms import (
+    Compose,
+    RandFlipd,
+    RandAffined,
+    RandGaussianNoised,
+    RandGaussianSmoothd,
+    RandRicianNoised,
+    RandBiasFieldd,
+    RandScaleIntensityd,
+    RandAdjustContrastd,
+    RandGammaCorrectiond,
+    Rand3DElasticd,
+)
+
 
 
 
@@ -668,19 +682,26 @@ class UncertaintyPredictor(nnUNetPredictor):
 
                     # ---- Apply TTA ----
                     if self.enable_TTA_extended:
-                        data_tta, tta_metadata = self.tta_transform(data)
+                        # MONAI expects dict input
+                        data_dict = {"image": data}
+
+                        #self.tta_transform = get_tta_aggressive(keys=("image",))
+
+                        data_aug = self.tta_transform(data_dict)
+                        data_tta = data_aug["image"]
                     else:
+                        data_aug = None
                         data_tta = data,
-                        tta_metadata = None
 
                     # ---- Forward pass ----
                     # select appropriate inference context (inference_mode or no_grad)
                     with self._inference_context():
                         logits = self.predict_sliding_window_return_logits_uncertainty(data_tta)
 
-                    # ---- Invert spatial TTA ----
-                    if tta_metadata is not None:
-                        logits = self.tta_transform.inverse(logits, tta_metadata)
+                    # Invert spatial transforms on logits
+                    if data_aug is not None:
+                        logits_dict = {"image": logits}
+                        logits = self.tta_transform.inverse(logits_dict)["image"]
 
                     # logits is already on CPU if GPU OOM hapened
                     # If it survived on GPU, move it once
@@ -935,38 +956,189 @@ class UncertaintyPredictor(nnUNetPredictor):
         else:
             return self.predict_from_data_iterator_uncertainty(data_iterator, save_probabilities=save_probabilities)
         # todo: A few very important details -> currently regarless of whether we want the uncertainty_prediction or not it will go through the uncertainty predictor.
+    #
+    # def initialize_tta_transforms(self):
+    #     """
+    #     Sets up self.tta_transform based on patch size, mirroring, and TTA mode.
+    #     Can be called anytime after network/configuration is loaded.
+    #
+    #     NB: do_dummy_2d_data_aug is taken from nnUNetTrainer.configure_rotation_dummyDA_mirroring_and_inital_patch_size()
+    #     """
+    #     patch_size = self.configuration_manager.patch_size
+    #     dim = len(patch_size)
+    #
+    #     if dim == 2:
+    #         do_dummy_2d_data_aug = False
+    #     elif dim == 3:
+    #         ANISO_THRESHOLD = 3
+    #         do_dummy_2d_data_aug = (max(patch_size) / patch_size[0]) > ANISO_THRESHOLD
+    #     else:
+    #         raise RuntimeError(f"Unsupported patch dimension {dim}")
+    #
+    #     if self.enable_tta_nnunet_limits:
+    #         self.tta_transform = self.get_tta_extreme_training_transforms(
+    #             patch_size=patch_size,
+    #             mirror_axes=self.allowed_mirroring_axes if self.use_mirroring else None,
+    #             do_dummy_2d_data_aug=do_dummy_2d_data_aug
+    #         )
+    #
+    #     # TODO: initialize the other tta forms
+    #     # elif self.enable_tta_paper:
+    #     #     self.tta_transform = self.get_tta_paper_transforms(...)
+    #     # elif self.enable_tta_aggressive:
+    #     #     self.tta_transform = self.get_tta_aggressive_transforms(...)
+    #     else:
+    #         raise NotImplementedError("No TTA mode enabled")
 
     def initialize_tta_transforms(self):
         """
-        Sets up self.tta_transform based on patch size, mirroring, and TTA mode.
-        Can be called anytime after network/configuration is loaded.
-
-        NB: do_dummy_2d_data_aug is taken from nnUNetTrainer.configure_rotation_dummyDA_mirroring_and_inital_patch_size()
+        Initializes MONAI Test-Time Augmentation
         """
-        patch_size = self.configuration_manager.patch_size
-        dim = len(patch_size)
+        from monai.data import TestTimeAugmentation
 
-        if dim == 2:
-            do_dummy_2d_data_aug = False
-        elif dim == 3:
-            ANISO_THRESHOLD = 3
-            do_dummy_2d_data_aug = (max(patch_size) / patch_size[0]) > ANISO_THRESHOLD
-        else:
-            raise RuntimeError(f"Unsupported patch dimension {dim}")
+        # patch_size = self.configuration_manager.patch_size
+        # dim = len(patch_size)
+        #
+        # if dim == 2:
+        #     do_dummy_2d_data_aug = False
+        # elif dim == 3:
+        #     ANISO_THRESHOLD = 3
+        #     do_dummy_2d_data_aug = (max(patch_size) / patch_size[0]) > ANISO_THRESHOLD
+        # else:
+        #     raise RuntimeError(f"Unsupported patch dimension {dim}")
 
         if self.enable_tta_nnunet_limits:
-            self.tta_transform = self.get_tta_extreme_training_transforms(
-                patch_size=patch_size,
-                mirror_axes=self.allowed_mirroring_axes if self.use_mirroring else None,
-                do_dummy_2d_data_aug=do_dummy_2d_data_aug
-            )
+            self.tta_transform = self.get_monai_tta_extreme_transforms()
+        elif self.enable_tta_agressive:
+            self.tta_transform = self.get_monai_tta_aggressive()
+            # self.tta_transform = self.get_tta_extreme_training_transforms(
+            #     patch_size=patch_size,
+            #     mirror_axes=self.allowed_mirroring_axes if self.use_mirroring else None,
+            #     do_dummy_2d_data_aug=do_dummy_2d_data_aug
+            # )
+
         # TODO: initialize the other tta forms
         # elif self.enable_tta_paper:
         #     self.tta_transform = self.get_tta_paper_transforms(...)
         # elif self.enable_tta_aggressive:
         #     self.tta_transform = self.get_tta_aggressive_transforms(...)
         else:
+            self.tta_transform = None
             raise NotImplementedError("No TTA mode enabled")
+
+
+    def get_monai_tta_aggressive(self,
+            keys=("image",),
+    ):
+        """
+        Aggressive MRI-specific TTA for uncertainty stress testing.
+
+        This pipeline includes:
+        - scanner variability (bias field, Rician noise)
+        - strong intensity perturbations
+        - mild spatial perturbations
+        - OPTIONAL elastic deformation (comment out if undesired)
+
+        WARNING:
+        This estimates *stress sensitivity*, not calibrated uncertainty.
+        """
+
+        spatial_axes = list(self.allowed_mirroring_axes) if self.allowed_mirroring_axes else None
+
+        return Compose([
+
+                # --------------------------------------------------
+                # Spatial (invertible)
+                # --------------------------------------------------
+
+                RandFlipd(
+                    keys=keys,
+                    spatial_axis=spatial_axes,
+                    prob=0.5
+                ),
+
+                RandAffined(
+                    keys=keys,
+                    prob=0.7,
+                    rotate_range=(0.15, 0.15, 0.15),     # ~±8–9°
+                    scale_range=(0.1, 0.1, 0.1),         # ±10%
+                    translate_range=(5, 5, 5),            # voxels
+                    mode="bilinear",
+                    padding_mode="border"
+                ),
+
+                # ⚠️ OPTIONAL — comment out if you want cleaner uncertainty
+                Rand3DElasticd(
+                    keys=keys,
+                    prob=0.3,
+                    sigma_range=(4, 8),
+                    magnitude_range=(30, 80),
+                    mode="bilinear",
+                    padding_mode="border"
+                ),
+
+                # --------------------------------------------------
+                # Noise (strong uncertainty driver)
+                # --------------------------------------------------
+
+                RandGaussianNoised(
+                    keys=keys,
+                    prob=0.3,
+                    std=0.05
+                ),
+
+                RandRicianNoised(
+                    keys=keys,
+                    prob=0.3,
+                    std=(0.01, 0.15)
+                ),
+
+                # --------------------------------------------------
+                # Blur / resolution
+                # --------------------------------------------------
+
+                RandGaussianSmoothd(
+                    keys=keys,
+                    prob=0.3,
+                    sigma_x=(0.5, 2.0),
+                    sigma_y=(0.5, 2.0),
+                    sigma_z=(0.5, 2.0),
+                ),
+
+                # --------------------------------------------------
+                # MRI-specific intensity effects
+                # --------------------------------------------------
+
+                RandBiasFieldd(
+                    keys=keys,
+                    prob=0.4,
+                    coeff_range=(0.0, 0.5),
+                    degree=3
+                ),
+
+                # --------------------------------------------------
+                # Intensity / contrast / gamma
+                # --------------------------------------------------
+
+                RandScaleIntensityd(
+                    keys=keys,
+                    prob=0.4,
+                    factors=(0.6, 1.4)
+                ),
+
+                RandAdjustContrastd(
+                    keys=keys,
+                    prob=0.4,
+                    gamma=(0.6, 1.5)
+                ),
+
+                RandGammaCorrectiond(
+                    keys=keys,
+                    prob=0.4,
+                    gamma=(0.5, 1.8)
+                ),
+            ])
+
 
     def get_monai_tta_extreme_transforms(self):
         """
@@ -984,7 +1156,7 @@ class UncertaintyPredictor(nnUNetPredictor):
             RandAdjustContrastd,
             RandGammaCorrectiond,
         )
-
+        # NB there is no equivalent SimulateLowResolutionTransform in Monai (+ it is not invertible and breaks spatial consistency)
         spatial_axes = list(self.allowed_mirroring_axes) if self.allowed_mirroring_axes else None
 
         return Compose([
@@ -1005,11 +1177,12 @@ class UncertaintyPredictor(nnUNetPredictor):
 
             # --- Intensity (non-invertible, OK) ---
             RandGaussianNoised(keys=["image"], prob=0.4, std=0.2), # GaussianNoiseTransform
-            RandGaussianSmoothd(keys=["image"], prob=0.3, sigma_x=(0.5, 2.0)),
-            RandScaleIntensityd(keys=["image"], prob=0.4, factors=0.3),
-            RandAdjustContrastd(keys=["image"], prob=0.4, gamma=(0.6, 1.4)),
-            RandGammaCorrectiond(keys=["image"], prob=0.4, gamma=(0.5, 1.8)),
+            RandGaussianSmoothd(keys=["image"], prob=0.3, sigma_x=(0.5, 2.0)), #GaussianBlurTransform
+            RandScaleIntensityd(keys=["image"], prob=0.4, factors=0.3),  # MultiplicativeBrightnessTransform
+            RandAdjustContrastd(keys=["image"], prob=0.4, gamma=(0.6, 1.4)), # ContrastTransform
+            RandGammaCorrectiond(keys=["image"], prob=0.4, gamma=(0.5, 1.8)), # GammaTransform but without inversion. I can add it with: RandInvertIntensityd(keys=["image"], prob=0.5)
         ])
+
 
 
     @staticmethod
