@@ -16,14 +16,23 @@ from sympy.multipledispatch.dispatcher import RaiseNotImplementedError
 from batchgenerators.dataloading.multi_threaded_augmenter import MultiThreadedAugmenter
 from batchgenerators.utilities.file_and_folder_operations import subfiles, load_json, join, isfile, maybe_mkdir_p, isdir, subdirs, \
     save_json
+from batchgeneratorsv2.transforms.base.basic_transform import BasicTransform
+from batchgeneratorsv2.transforms.intensity.brightness import MultiplicativeBrightnessTransform
+from batchgeneratorsv2.transforms.intensity.contrast import ContrastTransform, BGContrast
 from batchgeneratorsv2.transforms.intensity.gamma import GammaTransform
 from batchgeneratorsv2.transforms.intensity.gaussian_noise import GaussianNoiseTransform
+from batchgeneratorsv2.transforms.noise.gaussian_blur import GaussianBlurTransform
+from batchgeneratorsv2.transforms.spatial.low_resolution import SimulateLowResolutionTransform
+from batchgeneratorsv2.transforms.spatial.spatial import SpatialTransform
+from batchgeneratorsv2.transforms.utils.compose import ComposeTransforms
+from batchgeneratorsv2.transforms.utils.pseudo2d import Convert3DTo2DTransform, Convert2DTo3DTransform
+from batchgeneratorsv2.transforms.utils.random import RandomTransform
 from torch import nn
 from torch._dynamo import OptimizedModule
 from tqdm import tqdm
 
 import nnunetv2
-from nnunetv2.configuration import default_num_processes
+from nnunetv2.configuration import ANISO_THRESHOLD, default_num_processes
 from nnunetv2.inference.export_prediction import export_prediction_from_logits, \
     convert_predicted_logits_to_segmentation_with_correct_shape
 from nnunetv2.inference.export_uncertainty_prediction import export_uncertainty_from_logits
@@ -171,6 +180,9 @@ class TTAextendedPredictor(nnUNetPredictor):
         )
 
 
+    # --- Low resolution simulation ---
+
+
     def _apply_stochastic_tta(self, x: torch.Tensor) -> torch.Tensor:
         """
         Apply weak stochastic augmentations.
@@ -250,6 +262,7 @@ class UncertaintyPredictor(nnUNetPredictor):
         self.enable_tta_paper = enable_tta_paper
 
         self.enable_TTA_extended = True if self.enable_tta_nnunet_limits or self.enable_tta_agressive or self.enable_tta_paper else False
+
         self.uncertainty_method_is_in_use = True if self.enable_TTA_extended or self.enable_mc_dropout or self.enable_swag_predict else False
         # todo: add layered_ensembles (both in __init__ and _get_uncertainty_method_name) + implement method
         self.uncertainty_method_name = self._get_uncertainty_method_name()
@@ -391,6 +404,9 @@ class UncertaintyPredictor(nnUNetPredictor):
 
         else:
             super().initialize_from_trained_model_folder(model_training_output_dir, use_folds, checkpoint_name)
+
+        if self.enable_TTA_extended:
+            self.initialize_tta_transforms()
 
     def predict_from_data_iterator_new_ofile(self,
                                    data_iterator,
@@ -650,9 +666,21 @@ class UncertaintyPredictor(nnUNetPredictor):
                     # sliding window forward
                     #todo: add actual tta stuff here -> see TTApredictor, currently there is no TTaugmentation added to data
 
+                    # ---- Apply TTA ----
+                    if self.enable_TTA_extended:
+                        data_tta, tta_metadata = self.tta_transform(data)
+                    else:
+                        data_tta = data,
+                        tta_metadata = None
+
+                    # ---- Forward pass ----
                     # select appropriate inference context (inference_mode or no_grad)
                     with self._inference_context():
-                        logits = self.predict_sliding_window_return_logits_uncertainty(data)
+                        logits = self.predict_sliding_window_return_logits_uncertainty(data_tta)
+
+                    # ---- Invert spatial TTA ----
+                    if tta_metadata is not None:
+                        logits = self.tta_transform.inverse(logits, tta_metadata)
 
                     # logits is already on CPU if GPU OOM hapened
                     # If it survived on GPU, move it once
@@ -907,6 +935,213 @@ class UncertaintyPredictor(nnUNetPredictor):
         else:
             return self.predict_from_data_iterator_uncertainty(data_iterator, save_probabilities=save_probabilities)
         # todo: A few very important details -> currently regarless of whether we want the uncertainty_prediction or not it will go through the uncertainty predictor.
+
+    def initialize_tta_transforms(self):
+        """
+        Sets up self.tta_transform based on patch size, mirroring, and TTA mode.
+        Can be called anytime after network/configuration is loaded.
+
+        NB: do_dummy_2d_data_aug is taken from nnUNetTrainer.configure_rotation_dummyDA_mirroring_and_inital_patch_size()
+        """
+        patch_size = self.configuration_manager.patch_size
+        dim = len(patch_size)
+
+        if dim == 2:
+            do_dummy_2d_data_aug = False
+        elif dim == 3:
+            ANISO_THRESHOLD = 3
+            do_dummy_2d_data_aug = (max(patch_size) / patch_size[0]) > ANISO_THRESHOLD
+        else:
+            raise RuntimeError(f"Unsupported patch dimension {dim}")
+
+        if self.enable_tta_nnunet_limits:
+            self.tta_transform = self.get_tta_extreme_training_transforms(
+                patch_size=patch_size,
+                mirror_axes=self.allowed_mirroring_axes if self.use_mirroring else None,
+                do_dummy_2d_data_aug=do_dummy_2d_data_aug
+            )
+        # TODO: initialize the other tta forms
+        # elif self.enable_tta_paper:
+        #     self.tta_transform = self.get_tta_paper_transforms(...)
+        # elif self.enable_tta_aggressive:
+        #     self.tta_transform = self.get_tta_aggressive_transforms(...)
+        else:
+            raise NotImplementedError("No TTA mode enabled")
+
+    def get_monai_tta_extreme_transforms(self):
+        """
+        MONAI-based TTA transforms for uncertainty estimation.
+        Spatial transforms are invertible.
+        Intensity transforms are stochastic but not inverted.
+        """
+        from monai.transforms import (
+            Compose,
+            RandAffined,
+            RandFlipd,
+            RandGaussianNoised,
+            RandGaussianSmoothd,
+            RandScaleIntensityd,
+            RandAdjustContrastd,
+            RandGammaCorrectiond,
+        )
+
+        spatial_axes = list(self.allowed_mirroring_axes) if self.allowed_mirroring_axes else None
+
+        return Compose([
+            # --- Spatial (invertible) ---
+            RandFlipd(
+                keys=["image"],
+                prob=0.5,
+                spatial_axis=spatial_axes,
+            ),
+            RandAffined( # SpatialTransform
+                keys=["image"],
+                prob=1.0,
+                rotate_range=(0.15, 0.15, 0.15),   # ~±8.5°
+                scale_range=(0.1, 0.1, 0.1),
+                mode="bilinear",
+                padding_mode="border",
+            ),
+
+            # --- Intensity (non-invertible, OK) ---
+            RandGaussianNoised(keys=["image"], prob=0.4, std=0.2), # GaussianNoiseTransform
+            RandGaussianSmoothd(keys=["image"], prob=0.3, sigma_x=(0.5, 2.0)),
+            RandScaleIntensityd(keys=["image"], prob=0.4, factors=0.3),
+            RandAdjustContrastd(keys=["image"], prob=0.4, gamma=(0.6, 1.4)),
+            RandGammaCorrectiond(keys=["image"], prob=0.4, gamma=(0.5, 1.8)),
+        ])
+
+
+    @staticmethod
+    def get_tta_extreme_training_transforms(
+            patch_size: Union[np.ndarray, Tuple[int]],
+            mirror_axes: Tuple[int, ...],
+            do_dummy_2d_data_aug: bool,
+    ) -> BasicTransform:
+        """
+        Its goal is not to improve mean segmentation accuracy, but to estimate predictive uncertainty by probing how sensitive the trained model is to plausible variations of the same input image.
+        For this we reuse some of the transforms used in training but increase its probability / range.
+
+        The pipeline is designed so that:
+        - the expected prediction remains unbiased
+        - variance in predictions reflects model ambiguity, not augmentation artifacts
+        - all perturbations are input-only and label-preserving
+        """
+
+        transforms = []
+
+        # --- Handle 2D-in-3D case (same as training) ---
+        if do_dummy_2d_data_aug:
+            ignore_axes = (0,)
+            transforms.append(Convert3DTo2DTransform())
+            patch_size_spatial = patch_size[1:]
+        else:
+            patch_size_spatial = patch_size
+            ignore_axes = None
+
+        # --- Conservative spatial perturbations ---
+        transforms.append(
+            SpatialTransform(
+                patch_size_spatial,
+                patch_center_dist_from_border=0,
+                random_crop=False,
+                p_elastic_deform=0,
+                p_rotation=0.5, #instead of 0.2
+                rotation=(-0.15, 0.15),     # ~±8.5° # instead of rotation_for_DA
+                p_scaling=0.5, #instead of 0.2
+                scaling=(0.9, 1.1), #instead of (0.7, 1.4)
+                p_synchronize_scaling_across_axes=1,
+                bg_style_seg_sampling=False
+            )
+        )
+
+        if do_dummy_2d_data_aug:
+            transforms.append(Convert2DTo3DTransform())
+
+        # --- Noise (strong driver of uncertainty) ---
+        transforms.append(
+            RandomTransform(
+                GaussianNoiseTransform(
+                    noise_variance=(0, 0.2), # instead of (0, 0.1)
+                    p_per_channel=1,
+                    synchronize_channels=True
+                ),
+                apply_probability=0.4 # instead of 0.1
+            )
+        )
+
+        # --- Blur ---
+        transforms.append(
+            RandomTransform(
+                GaussianBlurTransform(
+                    blur_sigma=(0.5, 2.0), # instead of (0.5, 1.)
+                    synchronize_channels=True, # instead of False
+                    synchronize_axes=True, # instead of False
+                    p_per_channel=1  #benchmark False instead of True
+                ),
+                apply_probability=0.3 # instead of 0.15
+            )
+        )
+        # --- Brightness ---
+        transforms.append(
+            RandomTransform(
+                MultiplicativeBrightnessTransform(
+                    multiplier_range=(0.7, 1.3), # instead of BGContrast((0.75, 1.25)) -> we remove BGContrast to avoid biasing to background / foreground,
+                    synchronize_channels=True, # instead of False
+                    p_per_channel=1
+                ),
+                apply_probability=0.4 # instead of 0.15
+            )
+        )
+
+        # --- Contrast ---
+        transforms.append(
+            RandomTransform(
+                ContrastTransform(
+                    contrast_range=(0.6, 1.4), # instead of BGContrast((0.75, 1.25)),
+                    preserve_range=True,
+                    synchronize_channels=False,
+                    p_per_channel=1
+                ),
+                apply_probability=0.4 # instead of 0.15
+            )
+        )
+
+        # --- Low resolution ---
+        transforms.append(
+            RandomTransform(
+                SimulateLowResolutionTransform(
+                    scale=(0.4, 1.0),
+                    synchronize_channels=True,
+                    synchronize_axes=True,
+                    ignore_axes=ignore_axes,
+                    p_per_channel=1
+                ),
+                apply_probability=0.4
+            )
+        )
+
+        # --- Gamma ---
+        transforms.append(
+            RandomTransform(
+                GammaTransform(
+                    gamma=(0.5, 1.8), # BGContrast((0.75, 1.25)),
+                    p_invert_image=0.5, # instead of 1 or 0
+                    synchronize_channels=False,
+                    p_per_channel=1,
+                    p_retain_stats=0 # instead of 1
+                ),
+                apply_probability=0.4 # instead of 1 or 0.3
+            )
+        )
+
+        #  is_cascaded is not implemented btw:)
+
+
+        return ComposeTransforms(transforms)
+
+
+
 
 
 
