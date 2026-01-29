@@ -50,6 +50,7 @@ from glob import glob
 
 from contextlib import contextmanager
 
+from monai.data.meta_tensor import MetaTensor
 from monai.transforms import (
     Compose,
     RandFlipd,
@@ -60,7 +61,6 @@ from monai.transforms import (
     RandBiasFieldd,
     RandScaleIntensityd,
     RandAdjustContrastd,
-    RandGammaCorrectiond,
     Rand3DElasticd,
 )
 
@@ -683,7 +683,7 @@ class UncertaintyPredictor(nnUNetPredictor):
                     # ---- Apply TTA ----
                     if self.enable_TTA_extended:
                         # MONAI expects dict input
-                        data_dict = {"image": data}
+                        data_dict = {"image": MetaTensor(data)}
 
                         #self.tta_transform = get_tta_aggressive(keys=("image",))
 
@@ -700,7 +700,7 @@ class UncertaintyPredictor(nnUNetPredictor):
 
                     # Invert spatial transforms on logits
                     if data_aug is not None:
-                        logits_dict = {"image": logits}
+                        logits_dict = {"image": MetaTensor(logits, meta=data_tta.meta, applied_operations=data_tta.applied_operations)}
                         logits = self.tta_transform.inverse(logits_dict)["image"]
 
                     # logits is already on CPU if GPU OOM hapened
@@ -1054,7 +1054,7 @@ class UncertaintyPredictor(nnUNetPredictor):
                 RandFlipd(
                     keys=keys,
                     spatial_axis=spatial_axes,
-                    prob=0.5
+                    prob=0.5,
                 ),
 
                 RandAffined(
@@ -1087,10 +1087,11 @@ class UncertaintyPredictor(nnUNetPredictor):
                     std=0.05
                 ),
 
+
                 RandRicianNoised(
                     keys=keys,
                     prob=0.3,
-                    std=(0.01, 0.15)
+                    std=1
                 ),
 
                 # --------------------------------------------------
@@ -1132,11 +1133,6 @@ class UncertaintyPredictor(nnUNetPredictor):
                     gamma=(0.6, 1.5)
                 ),
 
-                RandGammaCorrectiond(
-                    keys=keys,
-                    prob=0.4,
-                    gamma=(0.5, 1.8)
-                ),
             ])
 
 
@@ -1146,16 +1142,7 @@ class UncertaintyPredictor(nnUNetPredictor):
         Spatial transforms are invertible.
         Intensity transforms are stochastic but not inverted.
         """
-        from monai.transforms import (
-            Compose,
-            RandAffined,
-            RandFlipd,
-            RandGaussianNoised,
-            RandGaussianSmoothd,
-            RandScaleIntensityd,
-            RandAdjustContrastd,
-            RandGammaCorrectiond,
-        )
+
         # NB there is no equivalent SimulateLowResolutionTransform in Monai (+ it is not invertible and breaks spatial consistency)
         spatial_axes = list(self.allowed_mirroring_axes) if self.allowed_mirroring_axes else None
 
@@ -1179,8 +1166,7 @@ class UncertaintyPredictor(nnUNetPredictor):
             RandGaussianNoised(keys=keys, prob=0.4, std=0.2), # GaussianNoiseTransform
             RandGaussianSmoothd(keys=keys, prob=0.3, sigma_x=(0.5, 2.0)), #GaussianBlurTransform
             RandScaleIntensityd(keys=keys, prob=0.4, factors=0.3),  # MultiplicativeBrightnessTransform
-            RandAdjustContrastd(keys=keys, prob=0.4, gamma=(0.6, 1.4)), # ContrastTransform
-            RandGammaCorrectiond(keys=keys, prob=0.4, gamma=(0.5, 1.8)), # GammaTransform but without inversion. I can add it with: RandInvertIntensityd(keys=["image"], prob=0.5)
+            RandAdjustContrastd(keys=keys, prob=0.4, gamma=(0.6, 1.4)), # ContrastTransform / GammaTransform
         ])
 
 
