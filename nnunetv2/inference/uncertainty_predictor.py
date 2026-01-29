@@ -691,7 +691,7 @@ class UncertaintyPredictor(nnUNetPredictor):
                         data_tta = data_aug["image"]
                     else:
                         data_aug = None
-                        data_tta = data,
+                        data_tta = data
 
                     # ---- Forward pass ----
                     # select appropriate inference context (inference_mode or no_grad)
@@ -1140,7 +1140,7 @@ class UncertaintyPredictor(nnUNetPredictor):
             ])
 
 
-    def get_monai_tta_extreme_transforms(self):
+    def get_monai_tta_extreme_transforms(self, keys=("image",)):
         """
         MONAI-based TTA transforms for uncertainty estimation.
         Spatial transforms are invertible.
@@ -1162,12 +1162,12 @@ class UncertaintyPredictor(nnUNetPredictor):
         return Compose([
             # --- Spatial (invertible) ---
             RandFlipd(
-                keys=["image"],
+                keys=keys,
                 prob=0.5,
                 spatial_axis=spatial_axes,
             ),
             RandAffined( # SpatialTransform
-                keys=["image"],
+                keys=keys,
                 prob=1.0,
                 rotate_range=(0.15, 0.15, 0.15),   # ~±8.5°
                 scale_range=(0.1, 0.1, 0.1),
@@ -1176,11 +1176,11 @@ class UncertaintyPredictor(nnUNetPredictor):
             ),
 
             # --- Intensity (non-invertible, OK) ---
-            RandGaussianNoised(keys=["image"], prob=0.4, std=0.2), # GaussianNoiseTransform
-            RandGaussianSmoothd(keys=["image"], prob=0.3, sigma_x=(0.5, 2.0)), #GaussianBlurTransform
-            RandScaleIntensityd(keys=["image"], prob=0.4, factors=0.3),  # MultiplicativeBrightnessTransform
-            RandAdjustContrastd(keys=["image"], prob=0.4, gamma=(0.6, 1.4)), # ContrastTransform
-            RandGammaCorrectiond(keys=["image"], prob=0.4, gamma=(0.5, 1.8)), # GammaTransform but without inversion. I can add it with: RandInvertIntensityd(keys=["image"], prob=0.5)
+            RandGaussianNoised(keys=keys, prob=0.4, std=0.2), # GaussianNoiseTransform
+            RandGaussianSmoothd(keys=keys, prob=0.3, sigma_x=(0.5, 2.0)), #GaussianBlurTransform
+            RandScaleIntensityd(keys=keys, prob=0.4, factors=0.3),  # MultiplicativeBrightnessTransform
+            RandAdjustContrastd(keys=keys, prob=0.4, gamma=(0.6, 1.4)), # ContrastTransform
+            RandGammaCorrectiond(keys=keys, prob=0.4, gamma=(0.5, 1.8)), # GammaTransform but without inversion. I can add it with: RandInvertIntensityd(keys=["image"], prob=0.5)
         ])
 
 
