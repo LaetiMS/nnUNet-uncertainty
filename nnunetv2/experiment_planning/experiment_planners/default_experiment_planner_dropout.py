@@ -97,7 +97,8 @@ class _ExperimentPlanner_Dropout(ExperimentPlanner):
                 'norm_op': norm.__module__ + '.' + norm.__name__,
                 'norm_op_kwargs': {'eps': 1e-5, 'affine': True},
                 'dropout_op': 'torch.nn.Dropout3d' if len(spacing) == 3 else 'torch.nn.Dropout2d',
-                'dropout_op_kwargs': {'p': 0.0, 'inplace': True, 'central_dropout_p': self.center_dropout_p}, #p will be overwritten for the center stages if self.center_dropout_p > 0
+                'dropout_op_kwargs': {'p': 0.0, 'inplace': True}, # will be overwritten for the center stages if self.center_dropout_p > 0
+                'bayesian_dropout_cfg': {'central_p': self.center_dropout_p, 'depth': 3},
                 # 'dropout_op': 'torch.nn.Dropout3d' if len(spacing) == 3 else 'torch.nn.Dropout2d',
                 # 'dropout_op_kwargs': {'p': 0.0, 'inplace': True}, # will be overwritten for the center stages if self.center_dropout_p > 0
                 # 'central_dropout_p': self.center_dropout_p, # added
