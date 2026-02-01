@@ -475,7 +475,7 @@ class nnUNetTrainerWb_SWAG_no_warmup_AdamW_1200ep(nnUNetTrainerWb_SWAG_no_warmup
 # nnUNetTrainerWb_SWAG_no_warmup_optimizer
 # nnUNetTrainerWb_SWAG_no_warmup_optimizer_1200ep
 # nnUNetTrainerWb_SWAG_warmup_optimizer_1200ep
-
+# nnUNetTrainerWb_SWAG_no_warmup_optimizer_600ep
 
 
 
