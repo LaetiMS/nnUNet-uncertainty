@@ -442,6 +442,13 @@ class nnUNetTrainerWb_SWAG_no_warmup_optimizer_2ep(nnUNetTrainerWb_SWAG_no_warmu
         self.num_epochs = 2
         self.swag_start_epoch = 1
 
+class nnUNetTrainerWb_SWAG_no_warmup_optimizer_300ep(nnUNetTrainerWb_SWAG_no_warmup_optimizer):
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
+                 device: torch.device = torch.device('cuda')):
+        super().__init__(plans, configuration, fold, dataset_json, device=device)
+        self.num_epochs = 300
+        self.swag_start_epoch = 200
+
 class nnUNetTrainerWb_SWAG_no_warmup_optimizer_400ep(nnUNetTrainerWb_SWAG_no_warmup_optimizer):
     def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict,
                  device: torch.device = torch.device('cuda')):
@@ -482,6 +489,7 @@ class nnUNetTrainerWb_SWAG_no_warmup_AdamW_1200ep(nnUNetTrainerWb_SWAG_no_warmup
 # nnUNetTrainerWb_SWAG_no_warmup_optimizer
 # nnUNetTrainerWb_SWAG_no_warmup_optimizer_1200ep
 # nnUNetTrainerWb_SWAG_warmup_optimizer_1200ep
+# nnUNetTrainerWb_SWAG_no_warmup_optimizer_300ep
 # nnUNetTrainerWb_SWAG_no_warmup_optimizer_400ep
 # nnUNetTrainerWb_SWAG_no_warmup_optimizer_600ep
 
