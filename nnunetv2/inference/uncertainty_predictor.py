@@ -1559,6 +1559,41 @@ if __name__ == '__main__':
     # reduces the number of threads used for compiling. More threads don't help and can cause problems
     #os.environ['TORCHINDUCTOR_COMPILE_THREADS'] = 1
     # multiprocessing.set_start_method("spawn")
+
+    # # Save originals
+    # _old_inference_mode = torch.inference_mode
+    # _old_no_grad = torch.no_grad
+    #
+    # # Logging wrapper for inference_mode
+    # class LoggingInferenceMode:
+    #     def __init__(self):
+    #         self._ctx = _old_inference_mode()
+    #
+    #     def __enter__(self):
+    #         print("[DEBUG] Entering inference_mode")
+    #         return self._ctx.__enter__()
+    #
+    #     def __exit__(self, exc_type, exc_val, exc_tb):
+    #         print("[DEBUG] Exiting inference_mode")
+    #         return self._ctx.__exit__(exc_type, exc_val, exc_tb)
+    #
+    # # Logging wrapper for no_grad
+    # class LoggingNoGrad:
+    #     def __init__(self):
+    #         self._ctx = _old_no_grad()
+    #
+    #     def __enter__(self):
+    #         print("[DEBUG] Entering no_grad")
+    #         return self._ctx.__enter__()
+    #
+    #     def __exit__(self, exc_type, exc_val, exc_tb):
+    #         print("[DEBUG] Exiting no_grad")
+    #         return self._ctx.__exit__(exc_type, exc_val, exc_tb)
+    #
+    # # Override temporarily
+    # torch.inference_mode = lambda *args, **kwargs: LoggingInferenceMode()
+    # torch.no_grad = lambda *args, **kwargs: LoggingNoGrad()
+
     predict_entry_point_uncertainty()
 
 
