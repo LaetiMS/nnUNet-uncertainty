@@ -103,6 +103,34 @@ def adapt_spacing(spacing, ndim):
     # spacing shorter than ndim is invalid
     return None
 
+def has_valid_surface(mask: np.ndarray) -> bool:
+    """
+    A valid surface exists if the mask is neither empty nor full.
+    """
+    return mask.any() and not mask.all()
+
+
+def max_possible_hd(mask: np.ndarray, spacing):
+    """
+    Maximum possible Hausdorff distance = image diagonal
+    in physical units (or voxels if spacing is None).
+    """
+    # Remove non-spatial singleton dimensions
+    mask = np.squeeze(mask)
+    shape = np.array(mask.shape, dtype=float)
+
+    ndim = len(shape)
+
+    if spacing is None:
+        spacing = np.ones(ndim, dtype=float)
+    else:
+        spacing = adapt_spacing(spacing, ndim)
+
+    spacing = np.array(spacing, dtype=float)
+
+    return float(np.linalg.norm(shape * spacing))
+
+
 
 def compute_metrics(reference_file: str, prediction_file: str, image_reader_writer: BaseReaderWriter,
                     labels_or_regions: Union[List[int], List[Union[int, Tuple[int, ...]]]],
@@ -110,9 +138,10 @@ def compute_metrics(reference_file: str, prediction_file: str, image_reader_writ
     """
     Compute a variety of metrics for binary or multi-label segmentation:
     - Dice, IoU
-    - Precision, Sensitivity (Recall), Specificity, Balanced Accuracy
+    - Precision, Sensitivity (Recall), Specificity, Balanced Accuracy -> If class is not predicted although it exists in the ground truth we set to 0 and not to nan.
     - Lesion-wise Precision and Recall (case-level detection)
     - Hausdorff Distance (HD) and HD95 (with optional physical spacing)
+        - HD penalized uses the maximum possible distance in the case where a foreground class should have been predicted but was not.
     """
 
 
@@ -153,12 +182,12 @@ def compute_metrics(reference_file: str, prediction_file: str, image_reader_writ
         results['metrics'][r]['n_ref'] = fn + tp
 
         # Voxel-wise metrics
-        results['metrics'][r]['Precision'] = tp / (tp + fp) if (tp + fp) > 0 else np.nan
-        results['metrics'][r]['Sensitivity'] = tp / (tp + fn) if (tp + fn) > 0 else np.nan #recall
-        results['metrics'][r]['Specificity'] = tn / (tn + fp) if (tn + fp) > 0 else np.nan
-        results['metrics'][r]['BalancedAccuracy'] = (
-            0.5 * ((tp / (tp + fn) if (tp + fn) > 0 else 0) +
-                   (tn / (tn + fp) if (tn + fp) > 0 else 0))
+        results['metrics'][r]['Precision'] = tp / (tp + fp) if (tp + fp) > 0 else 0.0 #np.nan
+        results['metrics'][r]['Sensitivity'] = tp / (tp + fn) if (tp + fn) > 0 else 0.0 #np.nan #recall
+        results['metrics'][r]['Specificity'] = tn / (tn + fp) if (tn + fp) > 0 else 0.0 #np.nan
+        results["metrics"][r]["BalancedAccuracy"] = 0.5 * (
+                results["metrics"][r]["Sensitivity"] +
+                results["metrics"][r]["Specificity"]
         )
 
         # Case-level / lesion-wise metrics
@@ -169,12 +198,28 @@ def compute_metrics(reference_file: str, prediction_file: str, image_reader_writ
         # Lesion-wise Recall (Detection of GT tumor)
         results['metrics'][r]['LesionRecall'] = 1.0 if has_gt and has_overlap else (0.0 if has_gt else np.nan)
 
-        # Lesion-wise Precision (accuracy of predicted tumor)
+        # Lesion-wise Precision (accuracy of predicted tumor if there is any prediction)
         results['metrics'][r]['LesionPrecision'] = 1.0 if has_pred and has_overlap else (0.0 if has_pred else np.nan)
 
         # Hausdorff metrics (medpy)
-        # HD is undefined if either GT or prediction is empty
-        if has_gt and has_pred:
+        # HD is undefined if either GT or prediction is empty (no foreground) or full (only foreground)
+        valid_gt = has_valid_surface(mask_ref)
+        valid_pred = has_valid_surface(mask_pred)
+
+        max_hd = max_possible_hd(mask_ref, spacing)
+
+        # Initialize
+        results["metrics"][r]["HD_raw"] = np.nan
+        results["metrics"][r]["HD95_raw"] = np.nan
+        results["metrics"][r]["HD_penalized"] = np.nan
+        results["metrics"][r]["HD95_penalized"] = np.nan
+
+        # if not has_gt:
+        #     print(f"⚠ No GT for {reference_file}, region {r}")
+        # if not has_pred:
+        #     print(f"⚠ No prediction for {prediction_file}, region {r}")
+
+        if valid_gt and valid_pred:
             try:
                 # Remove singleton dimensions (important!)
                 mask_ref_hd = np.squeeze(mask_ref).astype(bool)
@@ -183,15 +228,25 @@ def compute_metrics(reference_file: str, prediction_file: str, image_reader_writ
                 ndim = mask_ref_hd.ndim
                 spacing_hd = adapt_spacing(spacing, ndim)
 
-                results['metrics'][r]['HD'] = hd(
-                    mask_pred_hd, mask_ref_hd, voxelspacing=spacing_hd
-                )
-                results['metrics'][r]['HD95'] = hd95(
-                    mask_pred_hd, mask_ref_hd, voxelspacing=spacing_hd
-                )
+                hd_val = hd(mask_pred_hd, mask_ref_hd, voxelspacing=spacing_hd)
+                hd95_val = hd95(mask_pred_hd, mask_ref_hd, voxelspacing=spacing_hd)
+
+                results["metrics"][r]["HD_raw"] = hd_val
+                results["metrics"][r]["HD95_raw"] = hd95_val
+                results["metrics"][r]["HD_penalized"] = hd_val
+                results["metrics"][r]["HD95_penalized"] = hd95_val
+
             except Exception as e:
-                results['metrics'][r]['HD'] = np.nan
-                results['metrics'][r]['HD95'] = np.nan
+                # leave NaNs
+                pass
+        if valid_gt and not valid_pred:
+            # penalize missed detection
+            results["metrics"][r]["HD_penalized"] = max_hd
+            results["metrics"][r]["HD95_penalized"] = max_hd
+
+        # else:
+        # GT invalid (empty or full) → leave all NaN
+
 
     return results
 
