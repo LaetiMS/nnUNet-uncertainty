@@ -30,51 +30,90 @@ def compute_uncertainty_metrics(
         ignore_label: int = None,
 ) -> dict:
     """
-    Compute region-conditioned uncertainty statistics.
+    Compute uncertainty statistics:
+      - global (unmasked)
+      - GT-conditioned (per region)
+      - background (per region)
+
+    Uncertainty is NEVER masked by prediction.
     """
 
     # load GT segmentation
-    seg_ref, seg_ref_dict = image_reader_writer.read_seg(reference_file)
+    seg_ref, _ = image_reader_writer.read_seg(reference_file)
 
-    # load uncertainty map (float image!)
-    unc, unc_dict = image_reader_writer.read_image(uncertainty_file)
+    # load uncertainty map
+    unc, _ = image_reader_writer.read_image(uncertainty_file)
     unc = unc.astype(np.float32)
-
-    # safety first
     unc = np.nan_to_num(unc, nan=0.0, posinf=0.0, neginf=0.0)
 
     ignore_mask = seg_ref == ignore_label if ignore_label is not None else None
 
-    results = {}
-    results["reference_file"] = reference_file
-    results["uncertainty_file"] = uncertainty_file
-    results["metrics"] = {}
+    results = {
+        "reference_file": reference_file,
+        "uncertainty_file": uncertainty_file,
+        "global": {},
+        "regions": {},
+    }
 
+    # ---------- GLOBAL (no masking!) ----------
+    global_values = unc if ignore_mask is None else unc[~ignore_mask]
+
+    results["global"] = {
+        "mean": float(global_values.mean()),
+        "std": float(global_values.std()),
+        "p50": float(np.percentile(global_values, 50)),
+        "p95": float(np.percentile(global_values, 95)),
+        "p99": float(np.percentile(global_values, 99)),
+        "max": float(global_values.max()),
+        "n_voxels": int(global_values.size),
+    }
+
+    # ---------- REGION-CONDITIONED ----------
     for r in labels_or_regions:
-        results["metrics"][r] = {}
-
         mask_ref = region_or_label_to_mask(seg_ref, r)
 
         if ignore_mask is not None:
             mask_ref = np.logical_and(mask_ref, ~ignore_mask)
 
-        # region statistics
+        region_dict = {}
+
+        # GT region
         if mask_ref.any():
             values = unc[mask_ref]
-            results["metrics"][r]["mean"] = float(values.mean())
-            results["metrics"][r]["std"] = float(values.std())
-            results["metrics"][r]["p50"] = float(np.percentile(values, 50))
-            results["metrics"][r]["p95"] = float(np.percentile(values, 95))
-            results["metrics"][r]["max"] = float(values.max())
-            results["metrics"][r]["n_voxels"] = int(mask_ref.sum())
+            region_dict["gt"] = {
+                "mean": float(values.mean()),
+                "std": float(values.std()),
+                "p50": float(np.percentile(values, 50)),
+                "p95": float(np.percentile(values, 95)),
+                "max": float(values.max()),
+                "n_voxels": int(mask_ref.sum()),
+            }
         else:
-            # no GT for this region
-            results["metrics"][r]["mean"] = np.nan
-            results["metrics"][r]["std"] = np.nan
-            results["metrics"][r]["p50"] = np.nan
-            results["metrics"][r]["p95"] = np.nan
-            results["metrics"][r]["max"] = np.nan
-            results["metrics"][r]["n_voxels"] = 0
+            region_dict["gt"] = {
+                "mean": np.nan,
+                "std": np.nan,
+                "p50": np.nan,
+                "p95": np.nan,
+                "max": np.nan,
+                "n_voxels": 0,
+            }
+
+        # Background (everything except this GT region)
+        bg_mask = ~mask_ref
+        if ignore_mask is not None:
+            bg_mask = np.logical_and(bg_mask, ~ignore_mask)
+
+        bg_values = unc[bg_mask]
+
+        region_dict["background"] = {
+            "mean": float(bg_values.mean()),
+            "std": float(bg_values.std()),
+            "p95": float(np.percentile(bg_values, 95)),
+            "max": float(bg_values.max()),
+            "n_voxels": int(bg_values.size),
+        }
+
+        results["regions"][r] = region_dict
 
     return results
 
