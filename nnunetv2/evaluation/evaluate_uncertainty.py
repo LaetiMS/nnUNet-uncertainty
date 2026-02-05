@@ -42,7 +42,7 @@ def compute_uncertainty_metrics(
     seg_ref, _ = image_reader_writer.read_seg(reference_file)
 
     # load uncertainty map
-    unc, _ = image_reader_writer.read_image(uncertainty_file)
+    unc, _ = image_reader_writer.read_images(uncertainty_file)
     unc = unc.astype(np.float32)
     unc = np.nan_to_num(unc, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -152,7 +152,7 @@ def compute_uncertainty_metrics_on_folder(
             tasks.append(
                 (
                     join(folder_ref, f_pred),
-                    unc_file,
+                    [unc_file],
                     image_reader_writer,
                     regions_or_labels,
                     ignore_label,
@@ -161,8 +161,15 @@ def compute_uncertainty_metrics_on_folder(
                 )
             )
 
-    with multiprocessing.get_context("spawn").Pool(num_processes) as pool:
-        results = pool.starmap(_compute_uncertainty_case_wrapper, tasks)
+    # no multiprocessing
+    results = []
+    for task in tasks:
+        r = _compute_uncertainty_case_wrapper(*task)
+        results.append(r)
+
+    # # multiprocessing
+    # with multiprocessing.get_context("spawn").Pool(num_processes) as pool:
+    #     results = pool.starmap(_compute_uncertainty_case_wrapper, tasks)
 
     # ---------------- aggregation ----------------
     per_case = {}
