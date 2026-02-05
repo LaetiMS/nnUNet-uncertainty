@@ -178,17 +178,40 @@ def compute_uncertainty_metrics_on_folder(
 
     # compute mean over cases
     means = {}
+
+    # find one valid case to get structure
+    first_case = next(iter(per_case.values()))
+
     for unc_name in uncertainty_names:
-        means[unc_name] = {}
+        if unc_name not in first_case:
+            continue
+
+        means[unc_name] = {
+            "global": {},
+            "regions": {},
+        }
+
+        # ---------- GLOBAL ----------
+        for k in first_case[unc_name]["global"].keys():
+            means[unc_name]["global"][k] = np.nanmean([
+                per_case[c][unc_name]["global"][k]
+                for c in per_case
+                if unc_name in per_case[c]
+            ])
+
+        # ---------- REGIONS ----------
         for r in regions_or_labels:
-            stats = {}
-            for k in per_case[next(iter(per_case))][unc_name][r].keys():
-                stats[k] = np.nanmean([
-                    per_case[c][unc_name][r][k]
-                    for c in per_case
-                    if unc_name in per_case[c]
-                ])
-            means[unc_name][r] = stats
+            means[unc_name]["regions"][r] = {}
+
+            for region_type in ("gt", "background"):
+                means[unc_name]["regions"][r][region_type] = {}
+
+                for k in first_case[unc_name]["regions"][r][region_type].keys():
+                    means[unc_name]["regions"][r][region_type][k] = np.nanmean([
+                        per_case[c][unc_name]["regions"][r][region_type][k]
+                        for c in per_case
+                        if unc_name in per_case[c]
+                    ])
 
     result = {
         "uncertainty_per_case": per_case,
@@ -217,7 +240,7 @@ def _compute_uncertainty_case_wrapper(
         image_reader_writer,
         regions_or_labels,
         ignore_label,
-    )["metrics"]
+    )
 
     return case_id, unc_name, metrics
 
