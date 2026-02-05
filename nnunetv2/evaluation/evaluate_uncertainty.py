@@ -114,6 +114,35 @@ def compute_uncertainty_metrics(
 
     return results
 
+
+def _compute_uncertainty_case_wrapper_for_json(
+        case_id: str,
+        ref_file: str,
+        unc_file: str,
+        image_reader_writer,
+        regions_or_labels,
+        ignore_label,
+):
+    """
+    Helper function to compute metrics for one patient + one uncertainty map.
+    """
+    metrics_dict = compute_uncertainty_metrics(
+        reference_file=ref_file,
+        uncertainty_file=unc_file,
+        image_reader_writer=image_reader_writer,
+        labels_or_regions=regions_or_labels,
+        ignore_label=ignore_label,
+    )
+    metrics_flat = metrics_dict["metrics"]
+    recursive_fix_for_json_export(metrics_flat)
+
+    return {
+        "reference_file": ref_file,
+        "uncertainty_file": unc_file,
+        "metrics": metrics_flat
+    }
+
+
 def compute_uncertainty_metrics_on_folder_separate_jsons(
         folder_ref: str,
         folder_pred: str,
@@ -146,35 +175,60 @@ def compute_uncertainty_metrics_on_folder_separate_jsons(
     ref_files = list(folder_ref.glob(f"*{file_ending}"))
     ref_map = {f.stem.replace(".nii", ""): f for f in ref_files}
 
+
     # --- loop over uncertainty types ---
     for unc_name in uncertainty_names:
-        metric_per_case = []
 
+        # multiprocessing
+        # --- prepare tasks ---
+        tasks = []
         for case_id, ref_file in ref_map.items():
             unc_file = uncertainty_dir / f"{case_id}_{unc_name}{file_ending}"
-
             if not unc_file.is_file():
                 if not chill:
                     raise FileNotFoundError(f"{unc_file} not found")
                 continue
+            tasks.append((case_id, str(ref_file), str(unc_file), image_reader_writer, regions_or_labels, ignore_label))
 
-            # compute metrics
-            metrics_dict = compute_uncertainty_metrics(
-                reference_file=str(ref_file),
-                uncertainty_file=str(unc_file),
-                image_reader_writer=image_reader_writer,
-                labels_or_regions=regions_or_labels,
-                ignore_label=ignore_label,
-            )
+        if not tasks:
+            print(f"No maps found for uncertainty '{unc_name}', skipping JSON.")
+            continue
 
-            metrics_flat = metrics_dict["metrics"]
-            recursive_fix_for_json_export(metrics_flat)
+        # --- compute metrics in parallel ---
+        with multiprocessing.get_context("spawn").Pool(num_processes) as pool:
+            metric_per_case = pool.starmap(_compute_uncertainty_case_wrapper_for_json, tasks)
 
-            metric_per_case.append({
-                "reference_file": str(ref_file),
-                "uncertainty_file": str(unc_file),
-                "metrics": metrics_flat
-            })
+
+
+
+        # # no multiprocessing
+        # metric_per_case = []
+        #
+        # for case_id, ref_file in ref_map.items():
+        #     unc_file = uncertainty_dir / f"{case_id}_{unc_name}{file_ending}"
+        #
+        #     if not unc_file.is_file():
+        #         if not chill:
+        #             raise FileNotFoundError(f"{unc_file} not found")
+        #         continue
+        #
+        #     # compute metrics
+        #     metrics_dict = compute_uncertainty_metrics(
+        #         reference_file=str(ref_file),
+        #         uncertainty_file=str(unc_file),
+        #         image_reader_writer=image_reader_writer,
+        #         labels_or_regions=regions_or_labels,
+        #         ignore_label=ignore_label,
+        #     )
+        #
+        #     metrics_flat = metrics_dict["metrics"]
+        #     recursive_fix_for_json_export(metrics_flat)
+        #
+        #     metric_per_case.append({
+        #         "reference_file": str(ref_file),
+        #         "uncertainty_file": str(unc_file),
+        #         "metrics": metrics_flat
+        #     })
 
         if not metric_per_case:
             print(f"No maps found for uncertainty '{unc_name}', skipping JSON.")
