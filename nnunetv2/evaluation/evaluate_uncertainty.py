@@ -235,7 +235,7 @@ def compute_uncertainty_metrics_on_folder2(
         folder_pred: str,
         dataset_json_file: str,
         plans_file: str,
-        output_file: str = None,
+        output_dir: str = None,
         num_processes: int = default_num_processes,
         chill: bool = False,
 ):
@@ -245,19 +245,24 @@ def compute_uncertainty_metrics_on_folder2(
     example_file = subfiles(folder_ref, suffix=file_ending, join=True)[0]
     rw = determine_reader_writer_from_dataset_json(dataset_json, example_file)()
 
-    if output_file is None:
-        output_file = join(folder_pred, "summary_uncertainty_maps.json")
+    # determine output folder
+    if output_dir is None:
+        output_dir = join(folder_pred, "uncertainty_metrics")
+    Path(output_dir).mkdir(exist_ok=True, parents=True)
 
+    # get label manager
     lm = PlansManager(plans_file).get_label_manager(dataset_json)
+    regions_or_labels = lm.foreground_regions if lm.has_regions else lm.foreground_labels
 
+    # call the new separate JSON function
     return compute_uncertainty_metrics_on_folder_separate_jsons(
-        folder_ref,
-        folder_pred,
-        output_file,
-        rw,
-        file_ending,
-        lm.foreground_regions if lm.has_regions else lm.foreground_labels,
-        lm.ignore_label,
+        folder_ref=folder_ref,
+        folder_pred=folder_pred,
+        output_dir=output_dir,
+        image_reader_writer=rw,
+        file_ending=file_ending,
+        regions_or_labels=regions_or_labels,
+        ignore_label=lm.ignore_label,
         num_processes=num_processes,
         chill=chill,
     )
@@ -287,7 +292,7 @@ def evaluate_uncertainty_folder_entry_point():
     parser.add_argument(
         "-o", type=str, required=False,
         default=None,
-        help="Output file. Optional. Default: pred_folder/summary_uncertainty_maps.json"
+        help="Output directory. Optional. Default: pred_folder"
     )
     parser.add_argument(
         "-np", type=int, required=False,
@@ -306,7 +311,7 @@ def evaluate_uncertainty_folder_entry_point():
         folder_pred=args.pred_folder,
         dataset_json_file=args.djfile,
         plans_file=args.pfile,
-        output_file=args.o,
+        output_dir=args.o,
         num_processes=args.np,
         chill=args.chill,
     )
