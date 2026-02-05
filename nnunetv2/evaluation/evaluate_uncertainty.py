@@ -21,44 +21,43 @@ from pathlib import Path
 
 
 
-
 def compute_uncertainty_metrics(
         reference_file: str,
         uncertainty_file: str,
         image_reader_writer: BaseReaderWriter,
-        labels_or_regions: Union[List[int], List[Union[int, Tuple[int, ...]]]],
+        labels_or_regions,
         ignore_label: int = None,
 ) -> dict:
     """
-    Compute uncertainty statistics:
-      - global (unmasked)
-      - GT-conditioned (per region)
-      - background (per region)
+    Evaluates uncertainty maps by computing distribution statistics:
+        - global (all valid voxels)
+        - GT-conditioned (inside region r)
+        - background (outside region r)
 
     Uncertainty is NEVER masked by prediction.
     """
 
-    # load GT segmentation
+    # ---------- Load data ----------
     seg_ref, _ = image_reader_writer.read_seg(reference_file)
+    seg_ref = seg_ref[0] if seg_ref.ndim == 4 else seg_ref
 
-    # load uncertainty map
-    unc, _ = image_reader_writer.read_images(uncertainty_file)
+    unc, _ = image_reader_writer.read_images([uncertainty_file])
     unc = unc.astype(np.float32)
     unc = np.nan_to_num(unc, nan=0.0, posinf=0.0, neginf=0.0)
 
     ignore_mask = seg_ref == ignore_label if ignore_label is not None else None
+    valid_mask = ~ignore_mask if ignore_mask is not None else np.ones_like(seg_ref, bool)
 
     results = {
         "reference_file": reference_file,
         "uncertainty_file": uncertainty_file,
-        "global": {},
-        "regions": {},
+        "metrics": {}
     }
 
-    # ---------- GLOBAL (no masking!) ----------
-    global_values = unc if ignore_mask is None else unc[~ignore_mask]
+    # ---------- GLOBAL ----------
+    global_values = unc[:, valid_mask]
 
-    results["global"] = {
+    results["metrics"]["global"] = {
         "mean": float(global_values.mean()),
         "std": float(global_values.std()),
         "p50": float(np.percentile(global_values, 50)),
@@ -70,179 +69,166 @@ def compute_uncertainty_metrics(
 
     # ---------- REGION-CONDITIONED ----------
     for r in labels_or_regions:
-        mask_ref = region_or_label_to_mask(seg_ref, r)
+        gt_mask = region_or_label_to_mask(seg_ref, r)
+        eval_mask = gt_mask & valid_mask
 
-        if ignore_mask is not None:
-            mask_ref = np.logical_and(mask_ref, ~ignore_mask)
-
-        region_dict = {}
-
-        # GT region
-        if mask_ref.any():
-            values = unc[mask_ref]
-            region_dict["gt"] = {
-                "mean": float(values.mean()),
-                "std": float(values.std()),
-                "p50": float(np.percentile(values, 50)),
-                "p95": float(np.percentile(values, 95)),
-                "max": float(values.max()),
-                "n_voxels": int(mask_ref.sum()),
+        if np.any(eval_mask):
+            values = unc[:, eval_mask]
+            results["metrics"][r] = {
+                "gt": {
+                    "mean": float(values.mean()),
+                    "std": float(values.std()),
+                    "p50": float(np.percentile(values, 50)),
+                    "p95": float(np.percentile(values, 95)),
+                    "p99": float(np.percentile(values, 99)),
+                    "max": float(values.max()),
+                    "n_voxels": int(eval_mask.sum()),
+                }
             }
         else:
-            region_dict["gt"] = {
-                "mean": np.nan,
-                "std": np.nan,
-                "p50": np.nan,
-                "p95": np.nan,
-                "max": np.nan,
-                "n_voxels": 0,
+            results["metrics"][r] = {
+                "gt": {
+                    "mean": np.nan,
+                    "std": np.nan,
+                    "p50": np.nan,
+                    "p95": np.nan,
+                    "p99": np.nan,
+                    "max": np.nan,
+                    "n_voxels": 0,
+                }
             }
 
-        # Background (everything except this GT region)
-        bg_mask = ~mask_ref
-        if ignore_mask is not None:
-            bg_mask = np.logical_and(bg_mask, ~ignore_mask)
+        # ---------- BACKGROUND ----------
+        bg_mask = (~gt_mask) & valid_mask
+        bg_values = unc[:, bg_mask]
 
-        bg_values = unc[bg_mask]
-
-        region_dict["background"] = {
+        results["metrics"][r]["background"] = {
             "mean": float(bg_values.mean()),
             "std": float(bg_values.std()),
+            "p50": float(np.percentile(bg_values, 50)),
             "p95": float(np.percentile(bg_values, 95)),
+            "p99": float(np.percentile(bg_values, 99)),
             "max": float(bg_values.max()),
             "n_voxels": int(bg_values.size),
         }
 
-        results["regions"][r] = region_dict
-
     return results
 
-
-def compute_uncertainty_metrics_on_folder(
+def compute_uncertainty_metrics_on_folder_separate_jsons(
         folder_ref: str,
         folder_pred: str,
-        output_file: str,
-        image_reader_writer: BaseReaderWriter,
-        file_ending: str,
-        regions_or_labels,
+        output_dir: str,
+        image_reader_writer,
+        file_ending: str = ".nii.gz",
+        regions_or_labels=None,
         ignore_label: int = None,
-        uncertainty_names=("variance", "entropy", "normalized_entropy",
-                           "mutual_information", "normalized_mutual_information"),
+        uncertainty_names=(
+                "variance",
+                "entropy",
+                "normalized_entropy",
+                "mutual_information",
+                "normalized_mutual_information",
+        ),
         num_processes: int = default_num_processes,
         chill: bool = True,
 ):
-    if output_file is not None:
-        assert output_file.endswith(".json")
+    """
+    Compute uncertainty metrics for all patients and save **one JSON per uncertainty type**.
+    """
+    folder_ref = Path(folder_ref)
+    folder_pred = Path(folder_pred)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True, parents=True)
 
-    files_pred = subfiles(folder_pred, suffix=file_ending, join=False)
-    files_ref = [join(folder_ref, f) for f in files_pred]
+    uncertainty_dir = folder_pred / "uncertainty_maps"
 
-    uncertainty_dir = join(folder_pred, "uncertainty_maps")
+    # --- collect reference files ---
+    ref_files = list(folder_ref.glob(f"*{file_ending}"))
+    ref_map = {f.stem.replace(".nii", ""): f for f in ref_files}
 
-    tasks = []
-    for f_ref, f_pred in zip(files_ref, files_pred):
-        case_id = f_pred.replace(file_ending, "")
-        for unc in uncertainty_names:
-            unc_file = join(uncertainty_dir, f"{case_id}_{unc}{file_ending}")
-            if not isfile(unc_file):
+    # --- loop over uncertainty types ---
+    for unc_name in uncertainty_names:
+        metric_per_case = []
+
+        for case_id, ref_file in ref_map.items():
+            unc_file = uncertainty_dir / f"{case_id}_{unc_name}{file_ending}"
+
+            if not unc_file.is_file():
                 if not chill:
-                    raise FileNotFoundError(unc_file)
+                    raise FileNotFoundError(f"{unc_file} not found")
                 continue
 
-            tasks.append(
-                (
-                    join(folder_ref, f_pred),
-                    [unc_file],
-                    image_reader_writer,
-                    regions_or_labels,
-                    ignore_label,
-                    case_id,
-                    unc,
-                )
+            # compute metrics
+            metrics_dict = compute_uncertainty_metrics(
+                reference_file=str(ref_file),
+                uncertainty_file=str(unc_file),
+                image_reader_writer=image_reader_writer,
+                labels_or_regions=regions_or_labels,
+                ignore_label=ignore_label,
             )
 
-    # no multiprocessing
-    results = []
-    for task in tasks:
-        r = _compute_uncertainty_case_wrapper(*task)
-        results.append(r)
+            metrics_flat = metrics_dict["metrics"]
+            recursive_fix_for_json_export(metrics_flat)
 
-    # # multiprocessing
-    # with multiprocessing.get_context("spawn").Pool(num_processes) as pool:
-    #     results = pool.starmap(_compute_uncertainty_case_wrapper, tasks)
+            metric_per_case.append({
+                "reference_file": str(ref_file),
+                "uncertainty_file": str(unc_file),
+                "metrics": metrics_flat
+            })
 
-    # ---------------- aggregation ----------------
-    per_case = {}
-    for case_id, unc_name, metrics in results:
-        per_case.setdefault(case_id, {})[unc_name] = metrics
-
-    # compute mean over cases
-    means = {}
-
-    # find one valid case to get structure
-    first_case = next(iter(per_case.values()))
-
-    for unc_name in uncertainty_names:
-        if unc_name not in first_case:
+        if not metric_per_case:
+            print(f"No maps found for uncertainty '{unc_name}', skipping JSON.")
             continue
 
-        means[unc_name] = {
-            "global": {},
-            "regions": {},
+        # --- compute mean metrics ---
+        first_case = metric_per_case[0]["metrics"]
+        means = {}
+
+        # global
+        means["global"] = {}
+        for k in first_case["global"].keys():
+            means["global"][k] = float(np.nanmean([c["metrics"]["global"][k] for c in metric_per_case]))
+
+        # per region
+        for r in regions_or_labels:
+            means[r] = {"gt": {}, "background": {}}
+            for region_type in ("gt", "background"):
+                keys = first_case[r][region_type].keys()
+                for k in keys:
+                    means[r][region_type][k] = float(np.nanmean([c["metrics"][r][region_type][k] for c in metric_per_case]))
+
+        # --- foreground mean (all regions except 0) ---
+        fg_regions = [r for r in regions_or_labels if r != 0 and str(r) != "0"]
+        foreground_mean = {"gt": {}, "background": {}}
+        for region_type in ("gt", "background"):
+            keys = first_case[fg_regions[0]][region_type].keys()
+            for k in keys:
+                foreground_mean[region_type][k] = float(
+                    np.nanmean([
+                        np.nanmean([c["metrics"][r][region_type][k] for r in fg_regions])
+                        for c in metric_per_case
+                    ])
+                )
+
+        # --- global mean ---
+        global_mean = {}
+        for k in first_case["global"].keys():
+            global_mean[k] = float(np.nanmean([c["metrics"]["global"][k] for c in metric_per_case]))
+
+        # --- final result dict ---
+        result = {
+            "metric_per_case": metric_per_case,
+            "mean": means,
+            "foreground_mean": foreground_mean,
+            "global_mean": global_mean
         }
 
-        # ---------- GLOBAL ----------
-        for k in first_case[unc_name]["global"].keys():
-            means[unc_name]["global"][k] = np.nanmean([
-                per_case[c][unc_name]["global"][k]
-                for c in per_case
-                if unc_name in per_case[c]
-            ])
+        # --- save JSON ---
+        output_file = output_dir / f"{unc_name}_metrics.json"
+        save_summary_json(result, str(output_file))
+        print(f"Saved metrics JSON for '{unc_name}' -> {output_file}")
 
-        # ---------- REGIONS ----------
-        for r in regions_or_labels:
-            means[unc_name]["regions"][r] = {}
 
-            for region_type in ("gt", "background"):
-                means[unc_name]["regions"][r][region_type] = {}
-
-                for k in first_case[unc_name]["regions"][r][region_type].keys():
-                    means[unc_name]["regions"][r][region_type][k] = np.nanmean([
-                        per_case[c][unc_name]["regions"][r][region_type][k]
-                        for c in per_case
-                        if unc_name in per_case[c]
-                    ])
-
-    result = {
-        "uncertainty_per_case": per_case,
-        "mean": means,
-    }
-
-    recursive_fix_for_json_export(result)
-
-    if output_file is not None:
-        save_summary_json(result, output_file)
-
-    return result
-
-def _compute_uncertainty_case_wrapper(
-        reference_file,
-        uncertainty_file,
-        image_reader_writer,
-        regions_or_labels,
-        ignore_label,
-        case_id,
-        unc_name,
-):
-    metrics = compute_uncertainty_metrics(
-        reference_file,
-        uncertainty_file,
-        image_reader_writer,
-        regions_or_labels,
-        ignore_label,
-    )
-
-    return case_id, unc_name, metrics
 
 def compute_uncertainty_metrics_on_folder2(
         folder_ref: str,
@@ -264,7 +250,7 @@ def compute_uncertainty_metrics_on_folder2(
 
     lm = PlansManager(plans_file).get_label_manager(dataset_json)
 
-    return compute_uncertainty_metrics_on_folder(
+    return compute_uncertainty_metrics_on_folder_separate_jsons(
         folder_ref,
         folder_pred,
         output_file,
