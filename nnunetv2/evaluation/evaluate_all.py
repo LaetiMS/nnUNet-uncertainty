@@ -31,7 +31,7 @@ def evaluate_all_metrics_folder_entry_point():
         help="plans.json file"
     )
     parser.add_argument(
-        "-method", type=int, required=True,
+        "-method", type=str, required=True,
         default="tta_mirroring",
         help=f"Uncertainty method used. Optional. Default: tta_mirroring"
     )
