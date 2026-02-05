@@ -41,23 +41,6 @@ def compute_ece(confidence, correct, n_bins=15):
 
     return float(ece)
 
-def compute_calibration_metrics_gpt(gt_voxels, probs_eval, n_bins=15, eps=1e-8):
-    # NLL
-    p_true = probs_eval[np.arange(gt_voxels.size), gt_voxels]
-    nll = float(-np.mean(np.log(p_true + eps)))
-
-    # Brier
-    y_onehot = np.eye(probs_eval.shape[1])[gt_voxels]
-    brier = float(np.mean(np.sum((probs_eval - y_onehot)**2, axis=1)))
-
-    # ECE
-    pred = np.argmax(probs_eval, axis=1)
-    confidence = np.max(probs_eval, axis=1)
-    correct = pred == gt_voxels
-    ece = compute_ece(confidence, correct, n_bins=n_bins)
-
-    return nll, brier, ece
-
 def compute_calibration_metrics(gt_voxels, probs_eval, n_bins=15, eps=1e-8):
     nr_classes=probs_eval.shape[1]
     # --- Negative Log-Likelihood (multiclass) ---
