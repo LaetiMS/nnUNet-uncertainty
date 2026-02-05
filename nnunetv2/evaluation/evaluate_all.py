@@ -50,7 +50,7 @@ def evaluate_all_metrics_folder_entry_point():
     args = parser.parse_args()
 
 
-    compute_metrics_on_folder2(args.gt_folder, args.pred_folder, args.djfile, args.pfile, join(args.output_folder, 'summary_probabilistic.json'), args.np, chill=args.chill)
+    compute_metrics_on_folder2(args.gt_folder, args.pred_folder, args.djfile, args.pfile, join(args.output_folder, 'segmentation_metrics.json'), args.np, chill=args.chill)
 
 
     compute_uncertainty_metrics_on_folder2(
