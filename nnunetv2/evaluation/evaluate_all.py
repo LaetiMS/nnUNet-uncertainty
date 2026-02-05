@@ -31,6 +31,11 @@ def evaluate_all_metrics_folder_entry_point():
         help="plans.json file"
     )
     parser.add_argument(
+        "-method", type=int, required=True,
+        default="tta_mirroring",
+        help=f"Uncertainty method used. Optional. Default: tta_mirroring"
+    )
+    parser.add_argument(
         "-output_folder", type=str, required=False,
         default=None,
         help="Output directory. Optional. Default: pred_folder"
@@ -52,17 +57,21 @@ def evaluate_all_metrics_folder_entry_point():
     print(f'computing segmentation metrics on folder {args.gt_folder}')
     compute_metrics_on_folder2(args.gt_folder, args.pred_folder, args.djfile, args.pfile, join(args.output_folder, 'segmentation_metrics.json'), args.np, chill=args.chill)
 
-    print(f'computing uncertainty_map metrics on folder {args.gt_folder}')
 
-    compute_uncertainty_metrics_on_folder2(
-        folder_ref=args.gt_folder,
-        folder_pred=args.pred_folder,
-        dataset_json_file=args.djfile,
-        plans_file=args.pfile,
-        output_dir=args.output_folder,
-        num_processes=args.np,
-        chill=args.chill,
-    )
+    if args.method != "tta_mirroring":
+        print(f'computing uncertainty_map metrics on folder {args.gt_folder}')
+
+        compute_uncertainty_metrics_on_folder2(
+            folder_ref=args.gt_folder,
+            folder_pred=args.pred_folder,
+            dataset_json_file=args.djfile,
+            plans_file=args.pfile,
+            output_dir=args.output_folder,
+            num_processes=args.np,
+            chill=args.chill,
+        )
+    else:
+        print(f"Method is {args.method} == tta_mirroring. No uncertainty maps exist")
 
     print(f'computing calibration metrics on folder {args.gt_folder}')
 
@@ -78,3 +87,6 @@ def evaluate_all_metrics_folder_entry_point():
             num_processes=args.np,
             chill=args.chill,
         )
+
+if __name__ == '__main__':
+    evaluate_all_metrics_folder_entry_point()
