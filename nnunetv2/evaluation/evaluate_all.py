@@ -49,9 +49,10 @@ def evaluate_all_metrics_folder_entry_point():
 
     args = parser.parse_args()
 
-
+    print(f'computing segmentation metrics on folder {args.gt_folder}')
     compute_metrics_on_folder2(args.gt_folder, args.pred_folder, args.djfile, args.pfile, join(args.output_folder, 'segmentation_metrics.json'), args.np, chill=args.chill)
 
+    print(f'computing uncertainty_map metrics on folder {args.gt_folder}')
 
     compute_uncertainty_metrics_on_folder2(
         folder_ref=args.gt_folder,
@@ -62,6 +63,8 @@ def evaluate_all_metrics_folder_entry_point():
         num_processes=args.np,
         chill=args.chill,
     )
+
+    print(f'computing calibration metrics on folder {args.gt_folder}')
 
     if args.prob_folder is not None:
         compute_probabilistic_metrics_on_folder2(
