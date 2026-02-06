@@ -57,8 +57,7 @@ def evaluate_all_metrics_folder_entry_point():
     print(f'computing segmentation metrics on folder {args.gt_folder}')
     compute_metrics_on_folder2(args.gt_folder, args.pred_folder, args.djfile, args.pfile, join(args.output_folder, 'segmentation_metrics.json'), args.np, chill=args.chill)
 
-
-    if args.method != "tta_mirroring":
+    if args.method not in ("tta_mirroring", "no_uncertainty"):
         print(f'computing uncertainty_map metrics on folder {args.gt_folder}')
 
         compute_uncertainty_metrics_on_folder2(
@@ -71,7 +70,7 @@ def evaluate_all_metrics_folder_entry_point():
             chill=args.chill,
         )
     else:
-        print(f"Method is {args.method} == tta_mirroring. No uncertainty maps exist")
+        print(f"Method is {args.method} == tta_mirroring or no_uncertainty. No uncertainty maps exist")
 
     print(f'computing calibration metrics on folder {args.gt_folder}')
 
