@@ -270,12 +270,17 @@ class UncertaintyPredictor(nnUNetPredictor):
 
         # which uncertainty method should be added
         self.enable_mc_dropout = enable_mc_dropout
+        if self.enable_mc_dropout:
+            self.mc_passes = 10
+
         self.enable_swag_predict = enable_swag_prediction
         self.enable_tta_nnunet_limits = enable_tta_nnunet_limits
         self.enable_tta_agressive = enable_tta_agressive
         self.enable_tta_paper = enable_tta_paper
 
         self.enable_TTA_extended = True if self.enable_tta_nnunet_limits or self.enable_tta_agressive or self.enable_tta_paper else False
+        if self.enable_TTA_extended:
+            self.tta_passes = 20
 
         self.uncertainty_method_is_in_use = True if self.enable_TTA_extended or self.enable_mc_dropout or self.enable_swag_predict else False
         # todo: add layered_ensembles (both in __init__ and _get_uncertainty_method_name) + implement method
@@ -647,8 +652,6 @@ class UncertaintyPredictor(nnUNetPredictor):
     def predict_logits_from_preprocessed_data_with_uncertainty(
             self,
             data: torch.Tensor,
-            mc_passes: int = 10,
-            tta_passes: int = 4,
     ) -> torch.Tensor:
         """
         Returns:
@@ -672,8 +675,8 @@ class UncertaintyPredictor(nnUNetPredictor):
             # network.eval or network.train
             set_network_mode_for_inference(self.network, self.enable_mc_dropout)
 
-            mc_iters = mc_passes if self.enable_mc_dropout else 1
-            tta_iters = tta_passes if self.enable_TTA_extended else 1
+            mc_iters = self.mc_passes if self.enable_mc_dropout else 1
+            tta_iters = self.tta_passes if self.enable_TTA_extended else 1
 
             for _ in range(mc_iters):
                 for _ in range(tta_iters):
