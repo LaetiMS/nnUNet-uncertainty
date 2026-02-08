@@ -280,7 +280,10 @@ class UncertaintyPredictor(nnUNetPredictor):
 
         self.enable_TTA_extended = True if self.enable_tta_nnunet_limits or self.enable_tta_agressive or self.enable_tta_paper else False
         if self.enable_TTA_extended:
-            self.tta_passes = 20
+            if self.use_mirroring:
+                self.tta_passes = 10
+            else:
+                self.tta_passes = 40
 
         self.uncertainty_method_is_in_use = True if self.enable_TTA_extended or self.enable_mc_dropout or self.enable_swag_predict else False
         # todo: add layered_ensembles (both in __init__ and _get_uncertainty_method_name) + implement method
