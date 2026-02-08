@@ -305,7 +305,7 @@ class UncertaintyPredictor(nnUNetPredictor):
             if self.enable_tta_nnunet_limits:
                 name += '_limits'
             if self.enable_tta_agressive:
-                name += '_agressive'
+                name += '_aggressive'
             if self.enable_tta_paper:
                 name += '_paper'
         if name == '':
