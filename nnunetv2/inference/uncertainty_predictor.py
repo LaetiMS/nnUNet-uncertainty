@@ -263,7 +263,7 @@ class UncertaintyPredictor(nnUNetPredictor):
                  enable_mc_dropout: bool = False,
                  enable_swag_prediction: bool = False,
                  enable_tta_nnunet_limits: bool = False,
-                 enable_tta_agressive: bool = False,
+                 enable_tta_aggressive: bool = False,
                  enable_tta_paper: bool = False,
                  ):
         super().__init__(tile_step_size,use_gaussian,use_mirroring,perform_everything_on_device, device, verbose, verbose_preprocessing, allow_tqdm)
@@ -275,10 +275,10 @@ class UncertaintyPredictor(nnUNetPredictor):
 
         self.enable_swag_predict = enable_swag_prediction
         self.enable_tta_nnunet_limits = enable_tta_nnunet_limits
-        self.enable_tta_agressive = enable_tta_agressive
+        self.enable_tta_aggressive = enable_tta_aggressive
         self.enable_tta_paper = enable_tta_paper
 
-        self.enable_TTA_extended = True if self.enable_tta_nnunet_limits or self.enable_tta_agressive or self.enable_tta_paper else False
+        self.enable_TTA_extended = True if self.enable_tta_nnunet_limits or self.enable_tta_aggressive or self.enable_tta_paper else False
         if self.enable_TTA_extended:
             if self.use_mirroring:
                 self.tta_passes = 10
@@ -304,7 +304,7 @@ class UncertaintyPredictor(nnUNetPredictor):
                 name += '_mirroring'
             if self.enable_tta_nnunet_limits:
                 name += '_limits'
-            if self.enable_tta_agressive:
+            if self.enable_tta_aggressive:
                 name += '_aggressive'
             if self.enable_tta_paper:
                 name += '_paper'
@@ -1015,7 +1015,7 @@ class UncertaintyPredictor(nnUNetPredictor):
 
         if self.enable_tta_nnunet_limits:
             self.tta_transform = self.get_monai_tta_extreme_transforms()
-        elif self.enable_tta_agressive:
+        elif self.enable_tta_aggressive:
             self.tta_transform = self.get_monai_tta_aggressive()
             # self.tta_transform = self.get_tta_extreme_training_transforms(
             #     patch_size=patch_size,
@@ -1381,8 +1381,8 @@ def predict_entry_point_uncertainty():
                         help='Set this flag to predict for each checkpoint saved in swag_snapshots. ')
     parser.add_argument('--activate_tta_nnunet_limits', action='store_true', required=False, default=False,
                         help='Set this flag to activate an extended TTA - training augmentations but more extreme - during the prediction.')
-    parser.add_argument('--activate_tta_agressive', action='store_true', required=False, default=False,
-                        help='Set this flag to activate an extended TTA - agressive augmentations from the torchio library that were not used in training - during the prediction.')
+    parser.add_argument('--activate_tta_aggressive', action='store_true', required=False, default=False,
+                        help='Set this flag to activate an extended TTA - aggressive augmentations from the torchio library that were not used in training - during the prediction.')
     parser.add_argument('--activate_tta_paper', action='store_true', required=False, default=False,
                         help='Set this flag to activate an extended TTA - augmentations used in paper: https://arxiv.org/abs/1807.07356 - during the prediction.')
     parser.add_argument('--activate_layered_ensembles', action='store_true', required=False, default=False,
@@ -1434,7 +1434,7 @@ def predict_entry_point_uncertainty():
                                 enable_mc_dropout=args.activate_mc_dropout_prediction, # added
                                 enable_swag_prediction = args.activate_swag_predict,
                                 enable_tta_nnunet_limits = args.activate_tta_nnunet_limits,
-                                enable_tta_agressive = args.activate_tta_agressive,
+                                enable_tta_aggressive = args.activate_tta_aggressive,
                                 enable_tta_paper = args.activate_tta_paper,
                                 #enable_layered_ensembles=args.activate_layered_ensembles,
                                 )
@@ -1451,7 +1451,7 @@ def predict_entry_point_uncertainty():
     #              enable_mc_dropout: bool = False,
     #              enable_swag_prediction: bool = False,
     #              enable_tta_nnunet_limits: bool = False,
-    #              enable_tta_agressive: bool = False,
+    #              enable_tta_aggressive: bool = False,
     #              enable_tta_paper: bool = False,
     #              ):
     #todo: here
