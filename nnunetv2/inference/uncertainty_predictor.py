@@ -262,6 +262,7 @@ class UncertaintyPredictor(nnUNetPredictor):
                  allow_tqdm: bool = True,
                  enable_mc_dropout: bool = False,
                  enable_swag_prediction: bool = False,
+                 enable_deep_ensembles: bool = False,
                  enable_tta_nnunet_limits: bool = False,
                  enable_tta_aggressive: bool = False,
                  enable_tta_paper: bool = False,
@@ -274,6 +275,7 @@ class UncertaintyPredictor(nnUNetPredictor):
             self.mc_passes = 10
 
         self.enable_swag_predict = enable_swag_prediction
+        self.enable_deep_ensembles = enable_deep_ensembles
         self.enable_tta_nnunet_limits = enable_tta_nnunet_limits
         self.enable_tta_aggressive = enable_tta_aggressive
         self.enable_tta_paper = enable_tta_paper
@@ -285,7 +287,7 @@ class UncertaintyPredictor(nnUNetPredictor):
             else:
                 self.tta_passes = 40
 
-        self.uncertainty_method_is_in_use = True if self.enable_TTA_extended or self.enable_mc_dropout or self.enable_swag_predict else False
+        self.uncertainty_method_is_in_use = True if self.enable_TTA_extended or self.enable_mc_dropout or self.enable_swag_predict or self.enable_deep_ensembles else False
         # todo: add layered_ensembles (both in __init__ and _get_uncertainty_method_name) + implement method
         self.uncertainty_method_name = self._get_uncertainty_method_name()
 
@@ -298,6 +300,8 @@ class UncertaintyPredictor(nnUNetPredictor):
             name += f"{('_' if not name =='' else '')}mc_dropout"
         if self.enable_swag_predict:
             name += f"{('_' if not name =='' else '')}swag"
+        if self.enable_deep_ensembles:
+            name += f"{('_' if not name =='' else '')}deep_ensembles"
         if self.use_mirroring or self.enable_TTA_extended:
             name += f"{('_' if not name =='' else '')}tta"
             if self.use_mirroring:
@@ -429,6 +433,8 @@ class UncertaintyPredictor(nnUNetPredictor):
 
         if self.enable_TTA_extended:
             self.initialize_tta_transforms()
+        # if self.enable_deep_ensembles and len(use_folds) != 1 and use_folds[0] != 'all':
+        #     raise ValueError('Only one fold was provided, to calculate deep ensembles you must provide multiple folds')
 
     def predict_from_data_iterator_new_ofile(self,
                                    data_iterator,
@@ -1379,6 +1385,8 @@ def predict_entry_point_uncertainty():
                         help='Set this flag to activate dropout during the prediction.')
     parser.add_argument('--activate_swag_predict', action='store_true', required=False, default=False,
                         help='Set this flag to predict for each checkpoint saved in swag_snapshots. ')
+    parser.add_argument('--activate_deep_ensembles', action='store_true', required=False, default=False,
+                        help='Set this flag to predict for each fold available in trainer. ')
     parser.add_argument('--activate_tta_nnunet_limits', action='store_true', required=False, default=False,
                         help='Set this flag to activate an extended TTA - training augmentations but more extreme - during the prediction.')
     parser.add_argument('--activate_tta_aggressive', action='store_true', required=False, default=False,
@@ -1433,6 +1441,7 @@ def predict_entry_point_uncertainty():
                                 allow_tqdm=not args.disable_progress_bar,
                                 enable_mc_dropout=args.activate_mc_dropout_prediction, # added
                                 enable_swag_prediction = args.activate_swag_predict,
+                                enable_deep_ensembles=args.activate_deep_ensembles,
                                 enable_tta_nnunet_limits = args.activate_tta_nnunet_limits,
                                 enable_tta_aggressive = args.activate_tta_aggressive,
                                 enable_tta_paper = args.activate_tta_paper,
