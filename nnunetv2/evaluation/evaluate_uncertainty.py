@@ -74,45 +74,51 @@ def compute_uncertainty_metrics(
     }
 
     # ---------- REGION-CONDITIONED ----------
-    for r in labels_or_regions:
+    from scipy.ndimage import binary_dilation, binary_erosion
 
+    # ---------- REGION-CONDITIONED ----------
+    for r in labels_or_regions:
         gt_mask = region_or_label_to_mask(seg_ref, r)
 
         # optional: load prediction if available
-        pred_mask = region_or_label_to_mask(seg_pred, r)
-        # If you don't want prediction-based masking, skip it.
+        pred_mask = region_or_label_to_mask(seg_pred, r) if seg_pred is not None else np.zeros_like(gt_mask, bool)
 
         # boundary band (2 voxel shell)
         dilated = binary_dilation(gt_mask, iterations=2)
         eroded = binary_erosion(gt_mask, iterations=2)
         boundary_mask = dilated ^ eroded
 
-        region_dict = {
+        # extended GT + boundary
+        gt_boundary_mask = gt_mask | boundary_mask
+
+        # prediction union GT
+        pred_union_gt_mask = gt_mask | pred_mask
+
+        # store masks for metrics
+        region_masks = {
             "gt": gt_mask,
-            "boundary": boundary_mask,
-            "prediction": pred_mask,
+            "boundary_only": boundary_mask,
+            "gt_plus_boundary": gt_boundary_mask,
+            "prediction_union_gt": pred_union_gt_mask,
         }
 
         results["metrics"][r] = {}
 
-        for region_name, region_mask in region_dict.items():
-
-            eval_mask = region_mask & valid_mask
-
-            if np.any(eval_mask):
-                values = unc[:, eval_mask]
-
-                results["metrics"][r][region_name] = {
+        # compute statistics for each mask
+        for mask_name, mask in region_masks.items():
+            if np.any(mask):
+                values = unc[:, mask]
+                stats = {
                     "mean": float(values.mean()),
                     "std": float(values.std()),
                     "p50": float(np.percentile(values, 50)),
                     "p95": float(np.percentile(values, 95)),
                     "p99": float(np.percentile(values, 99)),
                     "max": float(values.max()),
-                    "n_voxels": int(eval_mask.sum()),
+                    "n_voxels": int(mask.sum()),
                 }
             else:
-                results["metrics"][r][region_name] = {
+                stats = {
                     "mean": np.nan,
                     "std": np.nan,
                     "p50": np.nan,
@@ -121,6 +127,9 @@ def compute_uncertainty_metrics(
                     "max": np.nan,
                     "n_voxels": 0,
                 }
+
+            results["metrics"][r][mask_name] = stats
+
 
         # ---------- BACKGROUND ----------
         bg_mask = (~gt_mask) & valid_mask
@@ -273,16 +282,16 @@ def compute_uncertainty_metrics_on_folder_separate_jsons(
 
         # per region
         for r in regions_or_labels:
-            means[r] = {"gt": {}, "prediction": {}, "boundary": {}, "background": {}}
-            for region_type in ("gt", "boundary", "prediction", "background"):
+            means[r] = {"gt": {}, "boundary_only": {}, "gt_plus_boundary": {}, "prediction_union_gt": {}, "background": {}}
+            for region_type in ("gt", "boundary_only", "prediction", "gt_plus_boundary", "prediction_union_gt", "background"):
                 keys = first_case[r][region_type].keys()
                 for k in keys:
                     means[r][region_type][k] = float(np.nanmean([c["metrics"][r][region_type][k] for c in metric_per_case]))
 
         # --- foreground mean (all regions except 0) ---
         fg_regions = [r for r in regions_or_labels if r != 0 and str(r) != "0"]
-        foreground_mean = {"gt": {}, "prediction": {}, "boundary": {}, "background": {}}
-        for region_type in ("gt", "prediction", "boundary", "background"):
+        foreground_mean = {"gt": {}, "boundary_only": {}, "gt_plus_boundary": {}, "prediction_union_gt": {}, "background": {}}
+        for region_type in ("gt", "boundary_only", "gt_plus_boundary", "prediction_union_gt", "background"):
             keys = first_case[fg_regions[0]][region_type].keys()
             for k in keys:
                 foreground_mean[region_type][k] = float(
