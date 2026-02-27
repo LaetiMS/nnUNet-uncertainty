@@ -283,7 +283,7 @@ def compute_uncertainty_metrics_on_folder_separate_jsons(
         # per region
         for r in regions_or_labels:
             means[r] = {"gt": {}, "boundary_only": {}, "gt_plus_boundary": {}, "prediction_union_gt": {}, "background": {}}
-            for region_type in ("gt", "boundary_only", "prediction", "gt_plus_boundary", "prediction_union_gt", "background"):
+            for region_type in ("gt", "boundary_only", "gt_plus_boundary", "prediction_union_gt", "background"):
                 keys = first_case[r][region_type].keys()
                 for k in keys:
                     means[r][region_type][k] = float(np.nanmean([c["metrics"][r][region_type][k] for c in metric_per_case]))
