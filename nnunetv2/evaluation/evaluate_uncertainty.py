@@ -2,6 +2,7 @@ import multiprocessing
 import os
 from copy import deepcopy
 from typing import Tuple, List, Union
+from scipy.ndimage import binary_dilation, binary_erosion
 
 import numpy as np
 from batchgenerators.utilities.file_and_folder_operations import subfiles, join, save_json, load_json, \
@@ -23,6 +24,7 @@ from pathlib import Path
 
 def compute_uncertainty_metrics(
         reference_file: str,
+        prediction_file: str,
         uncertainty_file: str,
         image_reader_writer: BaseReaderWriter,
         labels_or_regions,
@@ -41,6 +43,9 @@ def compute_uncertainty_metrics(
     seg_ref, _ = image_reader_writer.read_seg(reference_file)
     seg_ref = seg_ref[0] if seg_ref.ndim == 4 else seg_ref
 
+    seg_pred, _ = image_reader_writer.read_seg(prediction_file)
+    seg_pred = seg_pred[0] if seg_pred.ndim == 4 else seg_pred
+
     unc, _ = image_reader_writer.read_images([uncertainty_file])
     unc = unc.astype(np.float32)
     unc = np.nan_to_num(unc, nan=0.0, posinf=0.0, neginf=0.0)
@@ -50,6 +55,7 @@ def compute_uncertainty_metrics(
 
     results = {
         "reference_file": reference_file,
+        "prediction_file": prediction_file,
         "uncertainty_file": uncertainty_file,
         "metrics": {}
     }
@@ -69,13 +75,34 @@ def compute_uncertainty_metrics(
 
     # ---------- REGION-CONDITIONED ----------
     for r in labels_or_regions:
-        gt_mask = region_or_label_to_mask(seg_ref, r)
-        eval_mask = gt_mask & valid_mask
 
-        if np.any(eval_mask):
-            values = unc[:, eval_mask]
-            results["metrics"][r] = {
-                "gt": {
+        gt_mask = region_or_label_to_mask(seg_ref, r)
+
+        # optional: load prediction if available
+        pred_mask = region_or_label_to_mask(seg_pred, r)
+        # If you don't want prediction-based masking, skip it.
+
+        # boundary band (2 voxel shell)
+        dilated = binary_dilation(gt_mask, iterations=2)
+        eroded = binary_erosion(gt_mask, iterations=2)
+        boundary_mask = dilated ^ eroded
+
+        region_dict = {
+            "gt": gt_mask,
+            "boundary": boundary_mask,
+            "prediction": pred_mask,
+        }
+
+        results["metrics"][r] = {}
+
+        for region_name, region_mask in region_dict.items():
+
+            eval_mask = region_mask & valid_mask
+
+            if np.any(eval_mask):
+                values = unc[:, eval_mask]
+
+                results["metrics"][r][region_name] = {
                     "mean": float(values.mean()),
                     "std": float(values.std()),
                     "p50": float(np.percentile(values, 50)),
@@ -84,10 +111,8 @@ def compute_uncertainty_metrics(
                     "max": float(values.max()),
                     "n_voxels": int(eval_mask.sum()),
                 }
-            }
-        else:
-            results["metrics"][r] = {
-                "gt": {
+            else:
+                results["metrics"][r][region_name] = {
                     "mean": np.nan,
                     "std": np.nan,
                     "p50": np.nan,
@@ -96,7 +121,6 @@ def compute_uncertainty_metrics(
                     "max": np.nan,
                     "n_voxels": 0,
                 }
-            }
 
         # ---------- BACKGROUND ----------
         bg_mask = (~gt_mask) & valid_mask
@@ -118,6 +142,7 @@ def compute_uncertainty_metrics(
 def _compute_uncertainty_case_wrapper_for_json(
         case_id: str,
         ref_file: str,
+        pred_file: str,
         unc_file: str,
         image_reader_writer,
         regions_or_labels,
@@ -128,6 +153,7 @@ def _compute_uncertainty_case_wrapper_for_json(
     """
     metrics_dict = compute_uncertainty_metrics(
         reference_file=ref_file,
+        prediction_file=pred_file,
         uncertainty_file=unc_file,
         image_reader_writer=image_reader_writer,
         labels_or_regions=regions_or_labels,
@@ -138,6 +164,7 @@ def _compute_uncertainty_case_wrapper_for_json(
 
     return {
         "reference_file": ref_file,
+        "prediction_file" : pred_file,
         "uncertainty_file": unc_file,
         "metrics": metrics_flat
     }
@@ -183,12 +210,13 @@ def compute_uncertainty_metrics_on_folder_separate_jsons(
         # --- prepare tasks ---
         tasks = []
         for case_id, ref_file in ref_map.items():
+            pred_file = folder_pred / f"{case_id}{file_ending}"
             unc_file = uncertainty_dir / f"{case_id}_{unc_name}{file_ending}"
             if not unc_file.is_file():
                 if not chill:
                     raise FileNotFoundError(f"{unc_file} not found")
                 continue
-            tasks.append((case_id, str(ref_file), str(unc_file), image_reader_writer, regions_or_labels, ignore_label))
+            tasks.append((case_id, str(ref_file), str(pred_file), str(unc_file), image_reader_writer, regions_or_labels, ignore_label))
 
         if not tasks:
             print(f"No maps found for uncertainty '{unc_name}', skipping JSON.")
@@ -245,16 +273,16 @@ def compute_uncertainty_metrics_on_folder_separate_jsons(
 
         # per region
         for r in regions_or_labels:
-            means[r] = {"gt": {}, "background": {}}
-            for region_type in ("gt", "background"):
+            means[r] = {"gt": {}, "boundary": {}, "background": {}}
+            for region_type in ("gt", "boundary", "background"):
                 keys = first_case[r][region_type].keys()
                 for k in keys:
                     means[r][region_type][k] = float(np.nanmean([c["metrics"][r][region_type][k] for c in metric_per_case]))
 
         # --- foreground mean (all regions except 0) ---
         fg_regions = [r for r in regions_or_labels if r != 0 and str(r) != "0"]
-        foreground_mean = {"gt": {}, "background": {}}
-        for region_type in ("gt", "background"):
+        foreground_mean = {"gt": {}, "boundary": {}, "background": {}}
+        for region_type in ("gt", "boundary", "background"):
             keys = first_case[fg_regions[0]][region_type].keys()
             for k in keys:
                 foreground_mean[region_type][k] = float(
